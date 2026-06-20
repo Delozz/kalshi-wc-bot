@@ -115,3 +115,42 @@ def split_train_val(
         val_year,
     )
     return train, val
+
+
+def build_live_features(
+    history: pd.DataFrame,
+    ratings: dict[str, float],
+    home: str,
+    away: str,
+    *,
+    neutral: bool,
+    host: str | None = None,
+) -> dict[str, float]:
+    """Build one upcoming match's feature dict (the FEATURE_COLUMNS contract).
+
+    For a future fixture, every known result predates kickoff, so ``history`` is used as
+    is. ``ratings`` should be the final ELO ratings computed over ``history``. The
+    returned dict carries NaN for missing form/H2H — the model pipelines impute it.
+    """
+    delta = elo.elo_delta(ratings, home, away) + elo.venue_adjustment(
+        home, away, neutral=neutral, host=host
+    )
+    home_form = form.team_form(history, home)
+    away_form = form.team_form(history, away)
+    head = h2h.h2h_for_match(history, home, away)
+    return {
+        "elo_delta_adj": delta,
+        "home_elo_pre": ratings.get(home, elo.BASE_RATING),
+        "away_elo_pre": ratings.get(away, elo.BASE_RATING),
+        "form_5_home": home_form["form_5"],
+        "form_5_away": away_form["form_5"],
+        "form_10_home": home_form["form_10"],
+        "form_10_away": away_form["form_10"],
+        "goals_scored_5_home": home_form["goals_scored_5"],
+        "goals_conceded_5_home": home_form["goals_conceded_5"],
+        "goals_scored_5_away": away_form["goals_scored_5"],
+        "goals_conceded_5_away": away_form["goals_conceded_5"],
+        "h2h_home_win_rate": head["win_rate"],
+        "h2h_goals_avg": head["goals_avg"],
+        "neutral_flag": 1.0 if neutral else 0.0,
+    }

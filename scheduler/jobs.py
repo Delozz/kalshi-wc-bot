@@ -80,17 +80,13 @@ def job_sync_portfolio() -> None:
 
 
 def job_generate_signals() -> None:
-    """Score upcoming fixtures against Kalshi prices (pending fixtures integration)."""
+    """Generate dry-run signals from fixtures + model + live Kalshi prices."""
 
     def _run() -> None:
-        if CONTEXT["artifact"] is None:
-            CONTEXT["artifact"] = load_latest_artifact()
-        markets = asyncio.run(kalshi.get_markets())
-        logger.info(
-            "Signal generation: %d markets seen. Fixture->feature mapping requires the "
-            "API-Football fixtures client (remaining live integration).",
-            len(markets),
-        )
+        from strategy import signal_gen
+
+        signals = asyncio.run(signal_gen.run_live(dry_run=True))
+        logger.info("generate_signals produced %d dry-run signal(s)", len(signals))
 
     _safe("generate_signals", _run)
 

@@ -11,6 +11,7 @@ import sqlite3
 from pathlib import Path
 
 from config import settings
+from schemas import Signal
 
 logger = logging.getLogger(__name__)
 
@@ -90,6 +91,31 @@ def init_db(db_path: Path | None = None) -> None:
     with connect(db_path) as conn:
         conn.executescript(SCHEMA)
     logger.info("Database initialized at %s", db_path or settings.db_path)
+
+
+def log_signal(conn: sqlite3.Connection, signal: Signal) -> None:
+    """Insert a generated signal into the `signals` table."""
+    generated = signal["generated_at"]
+    conn.execute(
+        "INSERT INTO signals (match_id, market_ticker, side, model_prob, market_implied, "
+        "edge, kelly_fraction, bet_size_cents, generated_at) VALUES (?,?,?,?,?,?,?,?,?)",
+        (
+            signal["match_id"],
+            signal["market_ticker"],
+            signal["side"],
+            signal["model_prob"],
+            signal["market_implied"],
+            signal["edge"],
+            signal["kelly_fraction"],
+            signal["bet_size_cents"],
+            (
+                generated.isoformat()
+                if hasattr(generated, "isoformat")
+                else str(generated)
+            ),
+        ),
+    )
+    conn.commit()
 
 
 if __name__ == "__main__":

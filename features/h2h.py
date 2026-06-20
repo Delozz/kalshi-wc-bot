@@ -55,3 +55,37 @@ def run_h2h(matches: pd.DataFrame, *, window: int = DEFAULT_WINDOW) -> pd.DataFr
     ordered["h2h_home_win_rate"] = win_rate
     ordered["h2h_goals_avg"] = goals_avg
     return ordered
+
+
+def h2h_for_match(
+    matches: pd.DataFrame, home: str, away: str, *, window: int = DEFAULT_WINDOW
+) -> dict[str, float]:
+    """Point-in-time H2H for one pairing from already-known matches.
+
+    Returns ``{"win_rate": .., "goals_avg": ..}`` from the home team's perspective over
+    the most recent ``window`` meetings; NaN when the pair has never met. ``matches`` is
+    assumed to already exclude anything at/after the fixture (for a future fixture, all
+    known results precede it).
+    """
+    mask = ((matches["home_team"] == home) & (matches["away_team"] == away)) | (
+        (matches["home_team"] == away) & (matches["away_team"] == home)
+    )
+    recent = matches[mask].sort_values("date").tail(window)
+
+    wins = 0
+    total_goals = 0
+    counted = 0
+    for row in recent.itertuples(index=False):
+        if pd.isna(row.fthg) or pd.isna(row.ftag):
+            continue
+        counted += 1
+        total_goals += int(row.fthg) + int(row.ftag)
+        home_won = (
+            (row.fthg > row.ftag) if row.home_team == home else (row.ftag > row.fthg)
+        )
+        if home_won:
+            wins += 1
+    return {
+        "win_rate": wins / counted if counted else float("nan"),
+        "goals_avg": total_goals / counted if counted else float("nan"),
+    }
