@@ -1,0 +1,30 @@
+# Kalshi WC Bot — pinned dependencies (Python 3.11+)
+
+# Data & numerics
+pandas==2.2.3
+numpy==2.1.3
+pyarrow==18.1.0            # parquet I/O for data/processed
+
+# HTTP
+httpx==0.28.1             # async ingestion clients
+
+# Modeling
+scikit-learn==1.5.2
+xgboost==2.1.3
+optuna==4.1.0
+
+# Data sources
+statsbombpy==1.14.0       # StatsBomb open-data puller
+feedparser==6.0.11        # optional Google News RSS
+
+# Scheduling & dashboard
+APScheduler==3.11.0
+rich==13.9.4
+
+# Config
+python-dotenv==1.0.1
+
+# Tooling
+pytest==8.3.4
+ruff==0.8.4
+black==24.10.0

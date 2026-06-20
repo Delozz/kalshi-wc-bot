@@ -1,0 +1,113 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python:*)",
+      "Bash(pip:*)",
+      "Bash(pip3:*)",
+      "Bash(python -m pytest*)",
+      "Bash(python -m ruff*)",
+      "Bash(python -m black*)",
+      "Bash(python -m backtest.*)",
+      "Bash(python -m model.*)",
+      "Bash(python -m strategy.*)",
+      "Bash(python -m features.*)",
+      "Bash(python -m ingestion.*)",
+      "Bash(python -m dashboard.*)",
+      "Bash(python -m scheduler.jobs*)",
+      "Bash(pytest*)",
+      "Bash(ruff check*)",
+      "Bash(black*)",
+      "Bash(git status)",
+      "Bash(git diff*)",
+      "Bash(git log*)",
+      "Bash(git add*)",
+      "Bash(git commit*)",
+      "Bash(git checkout*)",
+      "Bash(git branch*)",
+      "Bash(git stash*)",
+      "Bash(git merge*)",
+      "Bash(git pull*)",
+      "Bash(mkdir*)",
+      "Bash(New-Item*)",
+      "Bash(Copy-Item*)",
+      "Bash(Move-Item*)",
+      "Bash(Get-Content*)",
+      "Bash(Set-Content*)",
+      "Bash(Test-Path*)",
+      "Bash(Remove-Item data\\raw\\*)",
+      "Bash(Remove-Item data\\processed\\*)",
+      "Bash(sqlite3 data\\db.sqlite*)",
+      "Read(**)",
+      "Write(ingestion/**)",
+      "Write(features/**)",
+      "Write(model/**)",
+      "Write(strategy/**)",
+      "Write(backtest/**)",
+      "Write(execution/**)",
+      "Write(dashboard/**)",
+      "Write(scheduler/**)",
+      "Write(tests/**)",
+      "Write(data/processed/**)",
+      "Write(data/raw/**)",
+      "Write(config.py)",
+      "Write(requirements.txt)",
+      "Write(PRD.md)",
+      "Write(CLAUDE.md)",
+      "Write(.env.example)"
+    ],
+    "deny": [
+      "Bash(git push*)",
+      "Bash(git push --force*)",
+      "Bash(rm -rf*)",
+      "Bash(Remove-Item -Recurse -Force C:\\*)",
+      "Bash(Remove-Item -Recurse -Force .git*)",
+      "Bash(del /f*)",
+      "Bash(format*)",
+      "Bash(curl * | python*)",
+      "Bash(Invoke-Expression*)",
+      "Bash(iex*)",
+      "Bash(Start-Process*)",
+      "Bash(explorer*)",
+      "Bash(shutdown*)",
+      "Bash(taskkill*)",
+      "Bash(net user*)",
+      "Bash(netsh*)",
+      "Bash(reg add*)",
+      "Bash(reg delete*)",
+      "Bash(Set-ExecutionPolicy Unrestricted*)",
+      "Write(.env)",
+      "Write(.claude/settings.local.json)",
+      "Write(data/db.sqlite)",
+      "Write(model/artifacts/**)"
+    ]
+  },
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "powershell -Command \"$f='{{file}}'; if ($f -match '\\.(py)$') { ruff check $f --fix; black $f } \""
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "powershell -Command \"if ('{{command}}' -match 'KALSHI_API_KEY|KALSHI_API_SECRET|API_FOOTBALL_KEY|THE_ODDS_API_KEY') { Write-Error 'Secret detected in command — blocked'; exit 1 }\""
+          }
+        ]
+      }
+    ]
+  },
+  "env": {
+    "PYTHONDONTWRITEBYTECODE": "1",
+    "PYTHONUNBUFFERED": "1",
+    "ECC_GATEGUARD": "off"
+  }
+}
