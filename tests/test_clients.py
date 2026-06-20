@@ -9,7 +9,8 @@ from ingestion import kalshi, odds_api
 
 def test_kalshi_base_url_demo_by_default() -> None:
     # .env is absent in CI, so KALSHI_ENV defaults to demo (L8 — safe default).
-    assert kalshi.base_url() in (kalshi.DEMO_BASE, kalshi.PROD_BASE)
+    assert kalshi.base_url().startswith((kalshi.DEMO_HOST, kalshi.PROD_HOST))
+    assert kalshi.base_url().endswith(kalshi.PATH_PREFIX)
 
 
 def test_implied_yes_price_from_ask() -> None:
