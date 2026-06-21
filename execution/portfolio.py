@@ -62,17 +62,24 @@ def _parse_positions(raw: dict[str, object] | None) -> list[Position]:
     for item in market_positions:
         if not isinstance(item, dict):
             continue
-        count = int(item.get("position", 0))
+        # position_fp (FixedPointCount string, +YES/-NO); legacy: position (int)
+        pos_raw = item.get("position_fp") or item.get("position")
+        count = round(float(pos_raw)) if pos_raw else 0
         if count == 0:
             continue
+        # market_exposure_dollars (dollar string → cents); legacy: market_exposure (cents int)
+        exp_raw = item.get("market_exposure_dollars")
+        exposure_cents = (
+            round(float(exp_raw) * 100)
+            if exp_raw is not None
+            else int(item.get("market_exposure", 0))
+        )
         positions.append(
             Position(
                 ticker=str(item.get("ticker", "")),
                 side="yes" if count > 0 else "no",
                 count=abs(count),
-                avg_price_cents=int(
-                    item.get("market_exposure", 0) // max(abs(count), 1)
-                ),
+                avg_price_cents=exposure_cents // max(abs(count), 1),
             )
         )
     return positions

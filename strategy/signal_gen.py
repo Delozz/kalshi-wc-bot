@@ -59,7 +59,9 @@ def _host_for(
 def _open_interest(markets: list[dict[str, Any]], ticker: str) -> float:
     for market in markets:
         if str(market.get("ticker", "")) == ticker:
-            return float(market.get("open_interest", 0) or 0)
+            # Prefer open_interest_fp (FixedPointCount string); fall back to legacy int.
+            val = market.get("open_interest_fp") or market.get("open_interest") or 0
+            return float(val)
     return 0.0
 
 

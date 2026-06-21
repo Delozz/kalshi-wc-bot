@@ -36,27 +36,31 @@ def _fixture() -> Fixture:
 
 
 def _markets(home: int, draw: int, away: int) -> list[dict]:
+    """Build synthetic market dicts using real API field names (cents args for readability)."""
+    def _ask(cents: int) -> str:
+        return f"{cents / 100:.4f}"
+
     return [
         {
             "ticker": "KXWC26-BRA-H",
             "title": "Brazil vs Serbia",
             "yes_sub_title": "Brazil",
-            "yes_ask": home,
-            "open_interest": 10000,
+            "yes_ask_dollars": _ask(home),
+            "open_interest_fp": "10000.00",
         },
         {
             "ticker": "KXWC26-BRA-D",
             "title": "Brazil vs Serbia",
             "yes_sub_title": "Draw",
-            "yes_ask": draw,
-            "open_interest": 10000,
+            "yes_ask_dollars": _ask(draw),
+            "open_interest_fp": "10000.00",
         },
         {
             "ticker": "KXWC26-BRA-A",
             "title": "Brazil vs Serbia",
             "yes_sub_title": "Serbia",
-            "yes_ask": away,
-            "open_interest": 10000,
+            "yes_ask_dollars": _ask(away),
+            "open_interest_fp": "10000.00",
         },
     ]
 
@@ -120,7 +124,7 @@ def test_no_signal_when_no_market_matches(monkeypatch) -> None:
         history=history,
         ratings=_ratings(history),
         bundle={},
-        markets=[{"ticker": "X", "title": "France vs Spain", "yes_ask": 5}],
+        markets=[{"ticker": "X", "title": "France vs Spain", "yes_ask_dollars": "0.05"}],
         bankroll_cents=20000,
     )
     assert signals == []
