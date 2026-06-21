@@ -31,18 +31,28 @@ logger = logging.getLogger(__name__)
 
 PROD_HOST = "https://api.elections.kalshi.com"
 DEMO_HOST = "https://demo-api.kalshi.co"
+# Public market data always reads from production — demo does not mirror live series
+# like KXWC26.  Signals must be computed against real prices regardless of which
+# environment handles order execution.
+PUBLIC_DATA_HOST = "https://external-api.kalshi.com"
 PATH_PREFIX = "/trade-api/v2"
 
 WC_SERIES_TICKER = "KXWC26"
 
 
 def _host() -> str:
+    """Trading host: demo for paper runs, prod after clean demo validation (L8)."""
     return DEMO_HOST if settings.kalshi_env == "demo" else PROD_HOST
 
 
 def base_url() -> str:
-    """Full API base (host + version prefix). Demo by default until validated (L8)."""
+    """Authenticated trading base URL (env-specific)."""
     return f"{_host()}{PATH_PREFIX}"
+
+
+def public_base_url() -> str:
+    """Public market-data base URL — always production (market data is real-world only)."""
+    return f"{PUBLIC_DATA_HOST}{PATH_PREFIX}"
 
 
 def _cache(name: str, payload: Any) -> None:
@@ -120,9 +130,13 @@ def signed_headers(
 
 
 async def _get(
-    client: httpx.AsyncClient, endpoint: str, params: dict[str, Any] | None = None
+    client: httpx.AsyncClient,
+    endpoint: str,
+    params: dict[str, Any] | None = None,
+    *,
+    use_public: bool = False,
 ) -> dict[str, Any] | None:
-    url = f"{base_url()}{endpoint}"
+    url = f"{public_base_url() if use_public else base_url()}{endpoint}"
     try:
         resp = await client.get(url, params=params, timeout=30.0)
         resp.raise_for_status()
@@ -135,10 +149,17 @@ async def _get(
 async def get_markets(
     series_ticker: str = WC_SERIES_TICKER, status: str = "open"
 ) -> list[dict[str, Any]]:
-    """List markets for a series (default the 2026 WC). Empty list on failure (L9)."""
+    """List markets for a series (default the 2026 WC). Always hits production (L4, L9).
+
+    Market data is fetched from the production API regardless of KALSHI_ENV because
+    the demo environment does not carry live series like KXWC26.
+    """
     async with httpx.AsyncClient() as client:
         data = await _get(
-            client, "/markets", {"series_ticker": series_ticker, "status": status}
+            client,
+            "/markets",
+            {"series_ticker": series_ticker, "status": status},
+            use_public=True,
         )
     if not data:
         return []
@@ -147,9 +168,9 @@ async def get_markets(
 
 
 async def get_orderbook(ticker: str) -> dict[str, Any] | None:
-    """Fetch the live order book for a market ticker."""
+    """Fetch the live order book for a market ticker (production public endpoint)."""
     async with httpx.AsyncClient() as client:
-        data = await _get(client, f"/markets/{ticker}/orderbook")
+        data = await _get(client, f"/markets/{ticker}/orderbook", use_public=True)
     if data:
         _cache(f"kalshi_orderbook_{ticker}.json", data)
     return data
