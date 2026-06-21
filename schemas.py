@@ -12,8 +12,8 @@ from typing import Literal, TypedDict
 Outcome = Literal["H", "D", "A"]
 Stage = Literal["group", "round_of_16", "qf", "sf", "final"]
 OrderSide = Literal["YES", "NO"]
-OrderStatus = Literal["pending", "filled", "canceled"]
-BankrollEvent = Literal["deposit", "win", "loss", "fee"]
+OrderStatus = Literal["pending", "filled", "canceled", "settled"]
+BankrollEvent = Literal["deposit", "win", "loss", "fee", "sync"]
 
 
 class MatchRecord(TypedDict):

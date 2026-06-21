@@ -8,10 +8,11 @@ from __future__ import annotations
 
 import logging
 import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
 
 from config import settings
-from schemas import Signal
+from schemas import Order, Signal
 
 logger = logging.getLogger(__name__)
 
@@ -44,7 +45,7 @@ CREATE TABLE IF NOT EXISTS features (
 
 CREATE TABLE IF NOT EXISTS signals (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    match_id        TEXT NOT NULL REFERENCES matches(id),
+    match_id        TEXT NOT NULL,
     market_ticker   TEXT,
     side            TEXT,
     model_prob      REAL,
@@ -93,10 +94,15 @@ def init_db(db_path: Path | None = None) -> None:
     logger.info("Database initialized at %s", db_path or settings.db_path)
 
 
-def log_signal(conn: sqlite3.Connection, signal: Signal) -> None:
-    """Insert a generated signal into the `signals` table."""
-    generated = signal["generated_at"]
-    conn.execute(
+def _iso(value: object) -> str | None:
+    if value is None:
+        return None
+    return value.isoformat() if hasattr(value, "isoformat") else str(value)
+
+
+def log_signal(conn: sqlite3.Connection, signal: Signal) -> int:
+    """Insert a generated signal into the `signals` table; return its row id."""
+    cursor = conn.execute(
         "INSERT INTO signals (match_id, market_ticker, side, model_prob, market_implied, "
         "edge, kelly_fraction, bet_size_cents, generated_at) VALUES (?,?,?,?,?,?,?,?,?)",
         (
@@ -108,14 +114,86 @@ def log_signal(conn: sqlite3.Connection, signal: Signal) -> None:
             signal["edge"],
             signal["kelly_fraction"],
             signal["bet_size_cents"],
-            (
-                generated.isoformat()
-                if hasattr(generated, "isoformat")
-                else str(generated)
-            ),
+            _iso(signal["generated_at"]),
         ),
     )
     conn.commit()
+    return int(cursor.lastrowid)
+
+
+def log_order(conn: sqlite3.Connection, order: Order) -> None:
+    """Insert or replace an order row."""
+    conn.execute(
+        "INSERT OR REPLACE INTO orders (id, signal_id, status, limit_price, contracts, "
+        "filled_price, placed_at, settled_at, pnl_cents) VALUES (?,?,?,?,?,?,?,?,?)",
+        (
+            order["id"],
+            order["signal_id"],
+            order["status"],
+            order["limit_price"],
+            order["contracts"],
+            order.get("filled_price"),
+            _iso(order["placed_at"]),
+            _iso(order.get("settled_at")),
+            order.get("pnl_cents"),
+        ),
+    )
+    conn.commit()
+
+
+def update_order_status(
+    conn: sqlite3.Connection,
+    order_id: str,
+    status: str,
+    *,
+    filled_price: float | None = None,
+) -> None:
+    """Update an order's status (and filled price if provided)."""
+    conn.execute(
+        "UPDATE orders SET status = ?, filled_price = COALESCE(?, filled_price) "
+        "WHERE id = ?",
+        (status, filled_price, order_id),
+    )
+    conn.commit()
+
+
+def settle_order(
+    conn: sqlite3.Connection, order_id: str, *, settled_at: object, pnl_cents: int
+) -> None:
+    """Mark an order settled with its realized P&L."""
+    conn.execute(
+        "UPDATE orders SET status = 'settled', settled_at = ?, pnl_cents = ? WHERE id = ?",
+        (_iso(settled_at), pnl_cents, order_id),
+    )
+    conn.commit()
+
+
+def record_bankroll(conn: sqlite3.Connection, balance_cents: int, event: str) -> None:
+    """Append a bankroll ledger entry."""
+    conn.execute(
+        "INSERT INTO bankroll_log (timestamp, balance_cents, event) VALUES (?,?,?)",
+        (datetime.now(timezone.utc).isoformat(), balance_cents, event),
+    )
+    conn.commit()
+
+
+def latest_bankroll(conn: sqlite3.Connection) -> int | None:
+    """Most recent recorded bankroll balance in cents, or None if the ledger is empty."""
+    row = conn.execute(
+        "SELECT balance_cents FROM bankroll_log ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    return int(row["balance_cents"]) if row else None
+
+
+def unsettled_orders_for_match(
+    conn: sqlite3.Connection, match_id_suffix: str
+) -> list[sqlite3.Row]:
+    """Open (unsettled) orders whose signal's match_id ends with the suffix."""
+    return conn.execute(
+        "SELECT o.* FROM orders o JOIN signals s ON o.signal_id = s.id "
+        "WHERE s.match_id LIKE ? AND o.status != 'settled'",
+        (f"%{match_id_suffix}",),
+    ).fetchall()
 
 
 if __name__ == "__main__":

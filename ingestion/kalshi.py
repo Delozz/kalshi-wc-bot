@@ -233,3 +233,8 @@ async def create_order(
 async def cancel_order(order_id: str) -> dict[str, Any] | None:
     """Authenticated: cancel a resting order."""
     return await _authed_request("DELETE", f"/portfolio/orders/{order_id}")
+
+
+async def get_order(order_id: str) -> dict[str, Any] | None:
+    """Authenticated: fetch a single order's current state."""
+    return await _authed_request("GET", f"/portfolio/orders/{order_id}")

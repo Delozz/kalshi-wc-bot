@@ -28,6 +28,8 @@ WC_SEASON = 2026
 
 # Fixture statuses that mean "not yet played" (worth generating signals for).
 PREMATCH_STATUSES = frozenset({"NS", "TBD", "PST"})
+# Statuses that mean the match is over and can be settled.
+FINISHED_STATUSES = frozenset({"FT", "AET", "PEN"})
 
 
 @dataclass(frozen=True)
@@ -40,6 +42,8 @@ class Fixture:
     home_team: str
     away_team: str
     round: str | None
+    home_goals: int | None = None
+    away_goals: int | None = None
 
 
 async def _get(endpoint: str, params: dict[str, Any]) -> dict[str, Any] | None:
@@ -98,6 +102,7 @@ def parse_fixtures(raw: list[dict[str, Any]]) -> list[Fixture]:
             fx = item["fixture"]
             teams = item["teams"]
             league = item.get("league", {})
+            goals = item.get("goals") or {}
             fixtures.append(
                 Fixture(
                     fixture_id=int(fx["id"]),
@@ -106,6 +111,8 @@ def parse_fixtures(raw: list[dict[str, Any]]) -> list[Fixture]:
                     home_team=canonical(teams["home"]["name"]),
                     away_team=canonical(teams["away"]["name"]),
                     round=league.get("round"),
+                    home_goals=_int_or_none(goals.get("home")),
+                    away_goals=_int_or_none(goals.get("away")),
                 )
             )
         except (KeyError, TypeError, ValueError) as exc:  # L9 — skip one bad row
@@ -117,3 +124,26 @@ def parse_fixtures(raw: list[dict[str, Any]]) -> list[Fixture]:
 def upcoming(fixtures: list[Fixture]) -> list[Fixture]:
     """Keep only fixtures that have not been played yet."""
     return [f for f in fixtures if f.status in PREMATCH_STATUSES]
+
+
+def finished(fixtures: list[Fixture]) -> list[Fixture]:
+    """Keep only fixtures that have finished (and so can be settled)."""
+    return [f for f in fixtures if f.status in FINISHED_STATUSES]
+
+
+def outcome(fixture: Fixture) -> str | None:
+    """Match result as H/D/A from the goals, or None if not yet known."""
+    if fixture.home_goals is None or fixture.away_goals is None:
+        return None
+    if fixture.home_goals > fixture.away_goals:
+        return "H"
+    if fixture.home_goals == fixture.away_goals:
+        return "D"
+    return "A"
+
+
+def _int_or_none(value: Any) -> int | None:
+    try:
+        return int(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
