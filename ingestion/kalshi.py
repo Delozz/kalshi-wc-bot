@@ -147,18 +147,26 @@ async def _get(
 
 
 async def get_markets(
-    series_ticker: str = WC_SERIES_TICKER, status: str = "open"
+    series_ticker: str = WC_SERIES_TICKER,
+    status: str | None = None,
 ) -> list[dict[str, Any]]:
     """List markets for a series (default the 2026 WC). Always hits production (L4, L9).
 
     Market data is fetched from the production API regardless of KALSHI_ENV because
     the demo environment does not carry live series like KXWC26.
+
+    No status filter by default — Kalshi WC markets cycle through unopened/open/paused
+    between fixtures. Downstream filtering happens via implied_yes_price (returns None
+    when no ask exists) and the risk module's liquidity check.
     """
+    params: dict[str, str] = {"series_ticker": series_ticker}
+    if status is not None:
+        params["status"] = status
     async with httpx.AsyncClient() as client:
         data = await _get(
             client,
             "/markets",
-            {"series_ticker": series_ticker, "status": status},
+            params,
             use_public=True,
         )
     if not data:
