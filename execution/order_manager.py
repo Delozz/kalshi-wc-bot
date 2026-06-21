@@ -63,10 +63,24 @@ def prod_orders_allowed() -> bool:
     return os.getenv("KALSHI_ALLOW_PROD_ORDERS") == "1"
 
 
-async def place_order(
-    signal: Signal, *, dry_run: bool = True
-) -> dict[str, object] | None:
-    """Place (or simulate) the order for a signal. Dry-run by default."""
+def _extract_order_id(response: object) -> str | None:
+    """Best-effort pull of the order id from a Kalshi create-order response."""
+    if not isinstance(response, dict):
+        return None
+    order = response.get("order")
+    if isinstance(order, dict) and order.get("order_id"):
+        return str(order["order_id"])
+    if response.get("order_id"):
+        return str(response["order_id"])
+    return None
+
+
+async def place_order(signal: Signal, *, dry_run: bool = True) -> dict[str, Any] | None:
+    """Place (or simulate) the order for a signal. Dry-run by default.
+
+    Returns ``{"status", "request", "order_id", "response"}`` so the caller can log the
+    order row. ``status`` is "dry_run" or "placed"; ``order_id`` is None for a dry run.
+    """
     request = order_from_signal(signal)
     if request is None:
         return None
@@ -76,7 +90,8 @@ async def place_order(
         return {
             "status": "dry_run",
             "request": request,
-            "placed_at": datetime.now(timezone.utc),
+            "order_id": None,
+            "response": None,
         }
 
     from config import settings
@@ -97,13 +112,19 @@ async def place_order(
         request.limit_price_cents,
         request.ticker,
     )
-    return await kalshi.create_order(
+    response = await kalshi.create_order(
         ticker=request.ticker,
         action=request.action,
         side=request.side,
         count=request.count,
         yes_price_cents=request.limit_price_cents,
     )
+    return {
+        "status": "placed",
+        "request": request,
+        "order_id": _extract_order_id(response),
+        "response": response,
+    }
 
 
 def build_order_row(

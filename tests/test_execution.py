@@ -47,6 +47,18 @@ def test_dry_run_does_not_send() -> None:
     result = asyncio.run(order_manager.place_order(_signal(), dry_run=True))
     assert result is not None
     assert result["status"] == "dry_run"
+    assert result["order_id"] is None
+
+
+def test_place_order_extracts_order_id(monkeypatch) -> None:
+    async def fake_create_order(**_kwargs):
+        return {"order": {"order_id": "abc123", "status": "resting"}}
+
+    monkeypatch.setattr(order_manager.kalshi, "create_order", fake_create_order)
+    result = asyncio.run(order_manager.place_order(_signal(), dry_run=False))
+    assert result is not None
+    assert result["status"] == "placed"
+    assert result["order_id"] == "abc123"
 
 
 def test_portfolio_exposure_and_peak() -> None:
