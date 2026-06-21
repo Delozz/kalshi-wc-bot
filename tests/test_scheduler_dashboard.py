@@ -43,3 +43,31 @@ def test_dashboard_renders_empty_portfolio() -> None:
     console = Console(file=buffer, width=100)
     render(state, [], console=console)
     assert "OPEN POSITIONS" in buffer.getvalue()
+
+
+def test_run_cycle_invokes_all_jobs_in_order(monkeypatch) -> None:
+    import scheduler.jobs as jobs
+
+    calls: list[str] = []
+    monkeypatch.setattr(jobs, "load_latest_artifact", lambda: None)
+    for name in (
+        "job_refresh_market_data",
+        "job_sync_portfolio",
+        "job_generate_signals",
+        "job_settle_positions",
+        "job_update_bankroll",
+        "_render_dashboard",
+    ):
+        monkeypatch.setattr(jobs, name, (lambda n: lambda: calls.append(n))(name))
+
+    jobs.run_cycle(dry_run_orders=False)
+
+    assert calls == [
+        "job_refresh_market_data",
+        "job_sync_portfolio",
+        "job_generate_signals",
+        "job_settle_positions",
+        "job_update_bankroll",
+        "_render_dashboard",
+    ]
+    assert jobs.CONTEXT["dry_run_orders"] is False

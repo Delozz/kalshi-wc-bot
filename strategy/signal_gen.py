@@ -154,13 +154,25 @@ def generate_signals(
     return signals
 
 
-def _persist_signal(signal: Signal) -> None:
+def _persist(signal: Signal, result: dict[str, Any] | None, *, dry_run: bool) -> None:
+    """Persist the signal and, for real (non-dry-run) placements, the order row (L9)."""
+    from execution import order_manager
+
     try:
-        from data.db import connect, init_db, log_signal
+        from data.db import connect, init_db, log_order, log_signal
 
         init_db()
         with connect() as conn:
-            log_signal(conn, signal)
+            signal_id = log_signal(conn, signal)
+            order_id = result.get("order_id") if result else None
+            if not dry_run and order_id and result is not None:
+                row = order_manager.build_order_row(
+                    order_id=str(order_id),
+                    signal_id=signal_id,
+                    request=result["request"],
+                    status="pending",
+                )
+                log_order(conn, row)
     except (
         Exception
     ) as exc:  # noqa: BLE001 — persistence must not break signal gen (L9)
@@ -211,6 +223,6 @@ async def run_live(*, dry_run: bool = True) -> list[Signal]:
         n_open=state.open_count,
     )
     for signal in signals:
-        await order_manager.place_order(signal, dry_run=dry_run)
-        _persist_signal(signal)
+        result = await order_manager.place_order(signal, dry_run=dry_run)
+        _persist(signal, result, dry_run=dry_run)
     return signals

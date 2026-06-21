@@ -11,6 +11,7 @@ Run: ``python -m scheduler.jobs``  (demo env until validated, L8).
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import logging
 import pickle
@@ -85,8 +86,11 @@ def job_generate_signals() -> None:
     def _run() -> None:
         from strategy import signal_gen
 
-        signals = asyncio.run(signal_gen.run_live(dry_run=True))
-        logger.info("generate_signals produced %d dry-run signal(s)", len(signals))
+        dry_run = bool(CONTEXT.get("dry_run_orders", True))
+        signals = asyncio.run(signal_gen.run_live(dry_run=dry_run))
+        logger.info(
+            "generate_signals produced %d signal(s) (dry_run=%s)", len(signals), dry_run
+        )
 
     _safe("generate_signals", _run)
 
@@ -174,10 +178,67 @@ def build_scheduler() -> BlockingScheduler:
     return scheduler
 
 
+def _render_dashboard() -> None:
+    """Render the dashboard for the current portfolio + recent signals (best effort)."""
+    try:
+        from dashboard.app import _recent_signals, render
+        from execution.portfolio import PortfolioState
+
+        state = CONTEXT.get("portfolio")
+        if not isinstance(state, PortfolioState):
+            state = PortfolioState(
+                bankroll_cents=settings.initial_bankroll_cents,
+                peak_bankroll_cents=settings.initial_bankroll_cents,
+            )
+        render(state, _recent_signals())
+    except Exception as exc:  # noqa: BLE001 — dashboard is non-critical
+        logger.warning("Dashboard render failed: %s", exc)
+
+
+def run_cycle(*, dry_run_orders: bool = True) -> None:
+    """Run one full pass of every job, then render the dashboard (demo paper run).
+
+    With ``dry_run_orders=False`` and ``KALSHI_ENV=demo`` this places real demo orders;
+    prod still requires KALSHI_ALLOW_PROD_ORDERS=1 (L8).
+    """
+    CONTEXT["dry_run_orders"] = dry_run_orders
+    if CONTEXT["artifact"] is None:
+        CONTEXT["artifact"] = load_latest_artifact()
+    job_refresh_market_data()
+    job_sync_portfolio()
+    job_generate_signals()
+    job_settle_positions()
+    job_update_bankroll()
+    _render_dashboard()
+
+
 def main() -> None:
+    parser = argparse.ArgumentParser(description="Kalshi WC bot scheduler.")
+    parser.add_argument(
+        "--once",
+        action="store_true",
+        help="Run one full cycle and exit (demo paper run).",
+    )
+    parser.add_argument(
+        "--live-orders",
+        action="store_true",
+        help="Place real orders instead of dry-run (demo env unless prod opt-in, L8).",
+    )
+    args = parser.parse_args()
+
     configure_logging()
     ensure_dirs()
     CONTEXT["artifact"] = load_latest_artifact()
+
+    if args.once:
+        logger.info(
+            "Running one cycle (env=%s, live_orders=%s)",
+            settings.kalshi_env,
+            args.live_orders,
+        )
+        run_cycle(dry_run_orders=not args.live_orders)
+        return
+
     scheduler = build_scheduler()
     logger.info(
         "Starting scheduler (env=%s) with jobs: %s",
