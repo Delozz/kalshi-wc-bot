@@ -120,8 +120,7 @@ async def _settle_finished() -> None:
             result = api_football.outcome(fixture)
             if result is None:
                 continue
-            won = result == "H"  # v1 trades the home-win YES contract only
-            pnl = settlement.settle_match(conn, str(fixture.fixture_id), won)
+            pnl = settlement.settle_fixture(conn, fixture.fixture_id, result)
             logger.info(
                 "Settled fixture %s (%s): pnl=%dc", fixture.fixture_id, result, pnl
             )

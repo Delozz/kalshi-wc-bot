@@ -1,9 +1,11 @@
 """Signal generation (strategy/signal_gen.py).
 
 Combines upcoming fixtures, current ELO/form/H2H, the trained model, and live Kalshi
-prices into sized, risk-checked signals. v1 trades only the home-win YES contract; the
-market resolver (fixture -> Kalshi ticker + YES price) is injectable so the matching can
-be tested now and refined as the real Kalshi WC market structure is confirmed.
+prices into sized, risk-checked signals. It trades all three outcomes (home/draw/away)
+as YES contracts, one signal per outcome that clears the edge threshold. The market
+resolver (fixture -> per-outcome Kalshi ticker + YES price) is injectable so the
+matching can be tested now and refined as the real Kalshi WC market structure is
+confirmed.
 
 ``generate_signals`` is a pure function over already-fetched inputs (fully testable).
 ``run_live`` fetches everything (fixtures, markets, history, portfolio) and routes each
@@ -30,7 +32,10 @@ from strategy import risk
 
 logger = logging.getLogger(__name__)
 
-MarketResolver = Callable[[Fixture, list[dict[str, Any]]], "tuple[str, float] | None"]
+# Resolve a fixture to its outcome markets: {"H"|"D"|"A": (ticker, yes_price)}.
+MarketResolver = Callable[
+    [Fixture, list[dict[str, Any]]], dict[str, "tuple[str, float]"]
+]
 
 
 def _year_of(iso: str) -> int:
@@ -58,24 +63,38 @@ def _open_interest(markets: list[dict[str, Any]], ticker: str) -> float:
     return 0.0
 
 
-def default_market_resolver(
+def default_outcome_resolver(
     fixture: Fixture, markets: list[dict[str, Any]]
-) -> tuple[str, float] | None:
-    """Best-effort match: a market whose text mentions both teams; YES = home win."""
+) -> dict[str, tuple[str, float]]:
+    """Best-effort: map each outcome (H/D/A) to its Kalshi (ticker, YES price).
+
+    A market belongs to this fixture if its text mentions both teams. The YES outcome is
+    read from ``yes_sub_title``: the home team -> H, the away team -> A, "draw"/"tie" ->
+    D. Confirm against the real KXWC26 market structure before live trading.
+    """
     from ingestion.kalshi import implied_yes_price
 
     home = fixture.home_team.lower()
     away = fixture.away_team.lower()
+    resolved: dict[str, tuple[str, float]] = {}
     for market in markets:
         text = " ".join(
-            str(market.get(key, ""))
-            for key in ("title", "subtitle", "yes_sub_title", "ticker")
+            str(market.get(key, "")) for key in ("title", "subtitle", "ticker")
         ).lower()
-        if home in text and away in text:
-            price = implied_yes_price(market)
-            if price is not None:
-                return (str(market.get("ticker", "")), price)
-    return None
+        if home not in text or away not in text:
+            continue
+        price = implied_yes_price(market)
+        if price is None:
+            continue
+        ticker = str(market.get("ticker", ""))
+        yes_sub = str(market.get("yes_sub_title", "")).lower()
+        if "draw" in yes_sub or "tie" in yes_sub:
+            resolved["D"] = (ticker, price)
+        elif home in yes_sub:
+            resolved["H"] = (ticker, price)
+        elif away in yes_sub:
+            resolved["A"] = (ticker, price)
+    return resolved
 
 
 def generate_signals(
@@ -89,11 +108,11 @@ def generate_signals(
     peak_bankroll_cents: int | None = None,
     open_exposure_cents: int = 0,
     n_open: int = 0,
-    resolver: MarketResolver = default_market_resolver,
+    resolver: MarketResolver = default_outcome_resolver,
     hosts_by_year: dict[int, set[str]] | None = None,
     threshold: float | None = None,
 ) -> list[Signal]:
-    """Produce sized, risk-checked home-win signals for the given fixtures."""
+    """Produce sized, risk-checked signals across all outcomes for the given fixtures."""
     hosts_by_year = hosts_by_year or WC_HOSTS
     bankroll = bankroll_cents / 100.0
     peak = (
@@ -103,13 +122,12 @@ def generate_signals(
 
     signals: list[Signal] = []
     for fixture in fixtures:
-        resolved = resolver(fixture, markets)
-        if resolved is None:
+        outcome_markets = resolver(fixture, markets)
+        if not outcome_markets:
             logger.info(
-                "No Kalshi market for %s vs %s", fixture.home_team, fixture.away_team
+                "No Kalshi markets for %s vs %s", fixture.home_team, fixture.away_team
             )
             continue
-        ticker, yes_price_home = resolved
 
         year = _year_of(fixture.kickoff_utc)
         host = _host_for(fixture.home_team, fixture.away_team, year, hosts_by_year)
@@ -123,32 +141,39 @@ def generate_signals(
         )
         probs = predict_mod.predict_outcome(bundle, features)
 
-        signal = edge_mod.build_signal(
-            match_id=f"{fixture.home_team}_{fixture.away_team}_{fixture.fixture_id}",
-            market_ticker=ticker,
-            model_prob=probs["H"],
-            kalshi_yes_price=yes_price_home,
-            bankroll=bankroll,
-            threshold=threshold,
-        )
-        if signal is None:
-            continue
+        for outcome, (ticker, yes_price) in outcome_markets.items():
+            model_prob = probs.get(outcome)
+            if model_prob is None:
+                continue
+            signal = edge_mod.build_signal(
+                match_id=(
+                    f"{fixture.fixture_id}:{outcome}:"
+                    f"{fixture.home_team}_{fixture.away_team}"
+                ),
+                market_ticker=ticker,
+                model_prob=model_prob,
+                kalshi_yes_price=yes_price,
+                bankroll=bankroll,
+                threshold=threshold,
+            )
+            if signal is None:
+                continue
 
-        decision = risk.check_all(
-            bankroll=bankroll,
-            peak_bankroll=peak,
-            open_exposure=exposure,
-            new_bet=signal["bet_size_cents"] / 100.0,
-            n_open=n_open,
-            open_interest=_open_interest(markets, ticker),
-        )
-        if not decision.approved:
-            logger.info("Signal %s rejected by risk: %s", ticker, decision.reason)
-            continue
+            decision = risk.check_all(
+                bankroll=bankroll,
+                peak_bankroll=peak,
+                open_exposure=exposure,
+                new_bet=signal["bet_size_cents"] / 100.0,
+                n_open=n_open,
+                open_interest=_open_interest(markets, ticker),
+            )
+            if not decision.approved:
+                logger.info("Signal %s rejected by risk: %s", ticker, decision.reason)
+                continue
 
-        signals.append(signal)
-        exposure += signal["bet_size_cents"] / 100.0
-        n_open += 1
+            signals.append(signal)
+            exposure += signal["bet_size_cents"] / 100.0
+            n_open += 1
 
     logger.info("Generated %d signals from %d fixtures", len(signals), len(fixtures))
     return signals

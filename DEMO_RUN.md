@@ -58,6 +58,7 @@ python -m scheduler.jobs        # blocking scheduler; signals are dry-run by def
   market structure (ticker format; 3-way vs per-outcome).
 - **Team aliases:** `features/teams.py` maps source names to martj42 canonical names.
   Confirm against real API-Football fixture names.
-- v1 trades the **home-win YES** contract only (draw/away not yet implemented).
+- The bot trades all three outcomes (home/draw/away) as YES contracts, one signal per
+  outcome that clears the edge threshold.
 - The model's real edge is unproven until this live forward test — there is no
   historical WC odds data to backtest ROI against.

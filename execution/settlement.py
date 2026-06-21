@@ -15,7 +15,7 @@ from data.db import (
     latest_bankroll,
     record_bankroll,
     settle_order,
-    unsettled_orders_for_match,
+    unsettled_orders_for_fixture,
 )
 
 logger = logging.getLogger(__name__)
@@ -48,22 +48,33 @@ def settle_position(
     return pnl
 
 
-def settle_match(conn: sqlite3.Connection, match_id_suffix: str, won: bool) -> int:
-    """Settle every unsettled order for a match; return total realized P&L in cents.
+def _outcome_of(match_id: str) -> str | None:
+    """Read the bet outcome (H/D/A) from a ``"{fixture_id}:{outcome}:..."`` match_id."""
+    parts = match_id.split(":")
+    return parts[1] if len(parts) >= 2 else None
 
-    ``won`` reflects the bet we make (the home-win YES contract in v1).
+
+def settle_fixture(conn: sqlite3.Connection, fixture_id: object, result: str) -> int:
+    """Settle every unsettled order for a fixture against the match ``result`` (H/D/A).
+
+    Each order wins iff the outcome it bet on equals ``result``. Returns total realized
+    P&L in cents.
     """
     total = 0
-    for row in unsettled_orders_for_match(conn, match_id_suffix):
+    for row in unsettled_orders_for_fixture(conn, str(fixture_id)):
         filled = row["filled_price"]
         if filled is None:
             logger.info("Order %s never filled; skipping settlement", row["id"])
+            continue
+        outcome = _outcome_of(row["match_id"])
+        if outcome is None:
+            logger.warning("Cannot read outcome from match_id %s", row["match_id"])
             continue
         total += settle_position(
             conn,
             order_id=row["id"],
             filled_price_cents=round(float(filled) * 100),
             contracts=int(row["contracts"]),
-            won=won,
+            won=outcome == result,
         )
     return total

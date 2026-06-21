@@ -185,14 +185,17 @@ def latest_bankroll(conn: sqlite3.Connection) -> int | None:
     return int(row["balance_cents"]) if row else None
 
 
-def unsettled_orders_for_match(
-    conn: sqlite3.Connection, match_id_suffix: str
+def unsettled_orders_for_fixture(
+    conn: sqlite3.Connection, fixture_id: str
 ) -> list[sqlite3.Row]:
-    """Open (unsettled) orders whose signal's match_id ends with the suffix."""
+    """Open (unsettled) orders for a fixture (match_id prefixed ``"{fixture_id}:"``).
+
+    Includes ``match_id`` so the caller can read the bet outcome from it.
+    """
     return conn.execute(
-        "SELECT o.* FROM orders o JOIN signals s ON o.signal_id = s.id "
+        "SELECT o.*, s.match_id FROM orders o JOIN signals s ON o.signal_id = s.id "
         "WHERE s.match_id LIKE ? AND o.status != 'settled'",
-        (f"%{match_id_suffix}",),
+        (f"{fixture_id}:%",),
     ).fetchall()
 
 
