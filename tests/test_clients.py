@@ -14,6 +14,9 @@ def test_kalshi_base_url_demo_by_default() -> None:
 
 
 def test_implied_yes_price_from_ask() -> None:
+    # Current API: yes_ask_dollars is a FixedPointDollars string already in 0–1 range.
+    assert kalshi.implied_yes_price({"yes_ask_dollars": "0.62"}) == 0.62
+    # Legacy fallback: yes_ask was an integer in cents.
     assert kalshi.implied_yes_price({"yes_ask": 62}) == 0.62
     assert kalshi.implied_yes_price({"yes_bid": 60}) is None
 

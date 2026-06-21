@@ -156,11 +156,18 @@ async def get_orderbook(ticker: str) -> dict[str, Any] | None:
 
 
 def implied_yes_price(market: dict[str, Any]) -> float | None:
-    """YES ask price as a 0..1 probability (PRD 7.3: enter at the ask, not the mid)."""
-    ask = market.get("yes_ask")
-    if ask is None:
+    """YES ask price as a 0..1 probability (PRD 7.3: enter at the ask, not the mid).
+
+    Prefers ``yes_ask_dollars`` (FixedPointDollars string, already 0–1).  Falls back to
+    legacy ``yes_ask`` (integer cents) for any cached responses pre-dating the API
+    migration to dollar strings.
+    """
+    if (ask_dollars := market.get("yes_ask_dollars")) is not None:
+        return float(ask_dollars)
+    ask_cents = market.get("yes_ask")
+    if ask_cents is None:
         return None
-    return float(ask) / 100.0
+    return float(ask_cents) / 100.0
 
 
 # -------------------------------------------------------- authenticated endpoints

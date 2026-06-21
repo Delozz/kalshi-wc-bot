@@ -53,9 +53,10 @@ python -m scheduler.jobs        # blocking scheduler; signals are dry-run by def
 
 ## Verify before trusting it
 
-- **Market resolver:** `strategy/signal_gen.default_market_resolver` matches a fixture
-  to a Kalshi market by best-effort title text. Confirm it against the real `KXWC26`
-  market structure (ticker format; 3-way vs per-outcome).
+- **Market resolver:** `strategy/signal_gen.default_outcome_resolver` maps a fixture to
+  its per-outcome Kalshi markets (H/D/A) by best-effort `title` + `yes_sub_title` text.
+  Confirm it against the real `KXWC26` market structure (ticker format; 3-way vs
+  per-outcome; exact `yes_sub_title` wording for the draw leg).
 - **Team aliases:** `features/teams.py` maps source names to martj42 canonical names.
   Confirm against real API-Football fixture names.
 - The bot trades all three outcomes (home/draw/away) as YES contracts, one signal per
