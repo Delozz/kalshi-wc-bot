@@ -91,6 +91,68 @@ def job_generate_signals() -> None:
     _safe("generate_signals", _run)
 
 
+def job_settle_positions() -> None:
+    """Settle finished fixtures' orders and post realized P&L to the ledger."""
+
+    def _run() -> None:
+        asyncio.run(_settle_finished())
+
+    _safe("settle_positions", _run)
+
+
+async def _settle_finished() -> None:
+    from data.db import connect, init_db
+    from execution import settlement
+    from ingestion import api_football
+
+    raw = await api_football.fetch_fixtures()
+    done = api_football.finished(api_football.parse_fixtures(raw))
+    if not done:
+        logger.info("No finished fixtures to settle")
+        return
+    init_db()
+    with connect() as conn:
+        for fixture in done:
+            result = api_football.outcome(fixture)
+            if result is None:
+                continue
+            won = result == "H"  # v1 trades the home-win YES contract only
+            pnl = settlement.settle_match(conn, str(fixture.fixture_id), won)
+            logger.info(
+                "Settled fixture %s (%s): pnl=%dc", fixture.fixture_id, result, pnl
+            )
+
+
+def job_update_bankroll() -> None:
+    """Sync bankroll from Kalshi, record it, and alarm if the stop-loss is breached."""
+
+    def _run() -> None:
+        asyncio.run(_update_bankroll())
+
+    _safe("update_bankroll", _run)
+
+
+async def _update_bankroll() -> None:
+    from data.db import connect, init_db, record_bankroll
+    from execution import portfolio
+    from strategy.risk import stop_loss_triggered
+
+    state = await portfolio.sync_from_kalshi(
+        fallback_bankroll_cents=settings.initial_bankroll_cents
+    )
+    init_db()
+    with connect() as conn:
+        record_bankroll(conn, state.bankroll_cents, "sync")
+    if stop_loss_triggered(
+        state.bankroll_cents / 100.0, state.peak_bankroll_cents / 100.0
+    ):
+        logger.error(
+            "STOP-LOSS BREACHED: bankroll %dc vs peak %dc — halt betting",
+            state.bankroll_cents,
+            state.peak_bankroll_cents,
+        )
+
+
 def build_scheduler() -> BlockingScheduler:
     """Build (but do not start) the scheduler with all jobs registered."""
     scheduler = BlockingScheduler(timezone="UTC")
@@ -102,6 +164,12 @@ def build_scheduler() -> BlockingScheduler:
     )
     scheduler.add_job(
         job_generate_signals, CronTrigger(hour="*/3"), id="generate_signals"
+    )
+    scheduler.add_job(
+        job_settle_positions, CronTrigger(hour="*/2"), id="settle_positions"
+    )
+    scheduler.add_job(
+        job_update_bankroll, CronTrigger(minute="*/30"), id="update_bankroll"
     )
     return scheduler
 

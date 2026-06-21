@@ -16,9 +16,10 @@ import logging
 import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from typing import Any
 
 from ingestion import kalshi
-from schemas import Signal
+from schemas import Order, Signal
 
 logger = logging.getLogger(__name__)
 
@@ -103,3 +104,72 @@ async def place_order(
         count=request.count,
         yes_price_cents=request.limit_price_cents,
     )
+
+
+def build_order_row(
+    *,
+    order_id: str,
+    signal_id: int,
+    request: OrderRequest,
+    status: str = "pending",
+    filled_price: float | None = None,
+) -> Order:
+    """Build an :class:`Order` row for the database from a placed request."""
+    return Order(
+        id=order_id,
+        signal_id=signal_id,
+        status=status,  # type: ignore[typeddict-item]
+        limit_price=request.limit_price_cents / 100.0,
+        contracts=request.count,
+        filled_price=filled_price,
+        placed_at=datetime.now(timezone.utc),
+        settled_at=None,
+        pnl_cents=None,
+    )
+
+
+_FILLED_STATUSES = frozenset({"filled", "executed"})
+_CANCELED_STATUSES = frozenset({"canceled", "cancelled"})
+
+
+async def _kalshi_status(order_id: str) -> str:
+    resp = await kalshi.get_order(order_id)
+    if not resp:
+        return "unknown"
+    return str((resp.get("order") or {}).get("status", ""))
+
+
+async def await_fill(
+    order_id: str,
+    *,
+    timeout_s: int = 300,
+    interval_s: int = 30,
+    status_fn: Any = None,
+    cancel_fn: Any = None,
+    sleeper: Any = None,
+) -> str:
+    """Poll an order until filled/canceled; cancel and return "timeout" if unfilled.
+
+    ``status_fn``/``cancel_fn``/``sleeper`` are injectable for testing (defaults hit the
+    live Kalshi API and asyncio.sleep). Poll every ``interval_s`` up to ``timeout_s``
+    (PRD 9.1: poll every 30s, cancel after 5 minutes).
+    """
+    import asyncio
+
+    status_fn = status_fn or _kalshi_status
+    cancel_fn = cancel_fn or kalshi.cancel_order
+    sleeper = sleeper or asyncio.sleep
+
+    waited = 0
+    while waited < timeout_s:
+        status = await status_fn(order_id)
+        if status in _FILLED_STATUSES:
+            return "filled"
+        if status in _CANCELED_STATUSES:
+            return "canceled"
+        await sleeper(interval_s)
+        waited += interval_s
+
+    logger.warning("Order %s unfilled after %ds; cancelling", order_id, timeout_s)
+    await cancel_fn(order_id)
+    return "timeout"

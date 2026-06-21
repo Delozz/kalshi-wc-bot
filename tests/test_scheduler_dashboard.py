@@ -14,7 +14,13 @@ from scheduler.jobs import build_scheduler
 def test_scheduler_registers_all_jobs() -> None:
     scheduler = build_scheduler()
     job_ids = {job.id for job in scheduler.get_jobs()}
-    assert job_ids == {"refresh_odds", "sync_portfolio", "generate_signals"}
+    assert job_ids == {
+        "refresh_odds",
+        "sync_portfolio",
+        "generate_signals",
+        "settle_positions",
+        "update_bankroll",
+    }
 
 
 def test_dashboard_renders_without_error() -> None:
