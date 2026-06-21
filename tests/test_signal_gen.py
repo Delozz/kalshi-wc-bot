@@ -1,29 +1,12 @@
-"""Integration tests for signal generation (strategy/signal_gen.py)."""
+"""Integration tests for signal generation (strategy/signal_gen.py) — all outcomes."""
 
 from __future__ import annotations
 
-import numpy as np
 import pandas as pd
 
 from features import elo
 from ingestion.api_football import Fixture
-from model import dataset
-from model.baseline import build_baseline
 from strategy import signal_gen
-
-
-def _toy_bundle() -> dict:
-    cols = dataset.FEATURE_COLUMNS
-    rng = np.random.RandomState(0)
-    x = rng.randn(90, len(cols))
-    y = np.array([0, 1, 2] * 30)
-    estimator = build_baseline().fit(x, y)
-    return {
-        "feature_columns": cols,
-        "selected": "baseline",
-        "baseline": estimator,
-        "model": estimator,
-    }
 
 
 def _history() -> pd.DataFrame:
@@ -43,7 +26,7 @@ def _history() -> pd.DataFrame:
 
 def _fixture() -> Fixture:
     return Fixture(
-        fixture_id=1,
+        fixture_id=999,
         kickoff_utc="2026-06-20T18:00:00+00:00",
         status="NS",
         home_team="Brazil",
@@ -52,15 +35,29 @@ def _fixture() -> Fixture:
     )
 
 
-def _markets(yes_ask: int) -> list[dict]:
+def _markets(home: int, draw: int, away: int) -> list[dict]:
     return [
         {
-            "ticker": "KXWC26-BRA",
+            "ticker": "KXWC26-BRA-H",
             "title": "Brazil vs Serbia",
             "yes_sub_title": "Brazil",
-            "yes_ask": yes_ask,
+            "yes_ask": home,
             "open_interest": 10000,
-        }
+        },
+        {
+            "ticker": "KXWC26-BRA-D",
+            "title": "Brazil vs Serbia",
+            "yes_sub_title": "Draw",
+            "yes_ask": draw,
+            "open_interest": 10000,
+        },
+        {
+            "ticker": "KXWC26-BRA-A",
+            "title": "Brazil vs Serbia",
+            "yes_sub_title": "Serbia",
+            "yes_ask": away,
+            "open_interest": 10000,
+        },
     ]
 
 
@@ -68,44 +65,76 @@ def _ratings(history: pd.DataFrame) -> dict[str, float]:
     return elo.final_ratings(history, use_tournament_k=True)
 
 
-def test_generates_signal_when_edge_exists() -> None:
+def _fixed_probs(_bundle, _features):
+    return {"H": 0.6, "D": 0.3, "A": 0.2}
+
+
+def test_resolver_maps_three_outcomes() -> None:
+    resolved = signal_gen.default_outcome_resolver(_fixture(), _markets(50, 30, 20))
+    assert resolved["H"] == ("KXWC26-BRA-H", 0.50)
+    assert resolved["D"] == ("KXWC26-BRA-D", 0.30)
+    assert resolved["A"] == ("KXWC26-BRA-A", 0.20)
+
+
+def test_generates_a_signal_per_outcome_with_edge(monkeypatch) -> None:
+    monkeypatch.setattr(signal_gen.predict_mod, "predict_outcome", _fixed_probs)
     history = _history()
     signals = signal_gen.generate_signals(
         fixtures=[_fixture()],
         history=history,
         ratings=_ratings(history),
-        bundle=_toy_bundle(),
-        markets=_markets(yes_ask=5),  # 5c price -> large edge vs any model prob
+        bundle={},
+        markets=_markets(5, 5, 5),  # cheap on every outcome -> edge on all three
         bankroll_cents=20000,
     )
-    assert len(signals) == 1
-    assert signals[0]["market_ticker"] == "KXWC26-BRA"
-    assert signals[0]["side"] == "YES"
-    # Hard cap: never more than 5% of $200 bankroll = 1000 cents.
-    assert 0 < signals[0]["bet_size_cents"] <= 1000
+    assert len(signals) == 3
+    assert {s["market_ticker"] for s in signals} == {
+        "KXWC26-BRA-H",
+        "KXWC26-BRA-D",
+        "KXWC26-BRA-A",
+    }
+    home = next(s for s in signals if s["market_ticker"] == "KXWC26-BRA-H")
+    assert home["match_id"].split(":")[1] == "H"  # outcome encoded in match_id
 
 
-def test_no_signal_when_no_market_matches() -> None:
+def test_only_outcomes_with_edge_are_traded(monkeypatch) -> None:
+    monkeypatch.setattr(signal_gen.predict_mod, "predict_outcome", _fixed_probs)
+    history = _history()
+    # H: 0.60 vs 0.50 -> +0.10 (bet); D: 0.30 vs 0.40 -> -0.10 (skip); A: 0.20 vs 0.10 -> +0.10 (bet)
+    signals = signal_gen.generate_signals(
+        fixtures=[_fixture()],
+        history=history,
+        ratings=_ratings(history),
+        bundle={},
+        markets=_markets(50, 40, 10),
+        bankroll_cents=20000,
+    )
+    assert {s["market_ticker"] for s in signals} == {"KXWC26-BRA-H", "KXWC26-BRA-A"}
+
+
+def test_no_signal_when_no_market_matches(monkeypatch) -> None:
+    monkeypatch.setattr(signal_gen.predict_mod, "predict_outcome", _fixed_probs)
     history = _history()
     signals = signal_gen.generate_signals(
         fixtures=[_fixture()],
         history=history,
         ratings=_ratings(history),
-        bundle=_toy_bundle(),
-        markets=[{"ticker": "KXWC26-XYZ", "title": "France vs Spain", "yes_ask": 5}],
+        bundle={},
+        markets=[{"ticker": "X", "title": "France vs Spain", "yes_ask": 5}],
         bankroll_cents=20000,
     )
     assert signals == []
 
 
-def test_risk_blocks_signal_on_stop_loss() -> None:
+def test_risk_blocks_on_stop_loss(monkeypatch) -> None:
+    monkeypatch.setattr(signal_gen.predict_mod, "predict_outcome", _fixed_probs)
     history = _history()
     signals = signal_gen.generate_signals(
         fixtures=[_fixture()],
         history=history,
         ratings=_ratings(history),
-        bundle=_toy_bundle(),
-        markets=_markets(yes_ask=5),
+        bundle={},
+        markets=_markets(5, 5, 5),
         bankroll_cents=5000,  # down 75% from peak -> stop-loss
         peak_bankroll_cents=20000,
     )
