@@ -9,7 +9,7 @@ from execution import order_manager
 
 def _request() -> order_manager.OrderRequest:
     return order_manager.OrderRequest(
-        ticker="KXWC26-BRA", action="buy", side="yes", count=10, limit_price_cents=50
+        ticker="KXWC26-BRA", side="bid", count=10, limit_price_cents=50
     )
 
 

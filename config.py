@@ -51,6 +51,7 @@ class Settings:
     kelly_fraction: float
     stop_loss_threshold: float
     initial_bankroll_cents: int
+    lineup_weight: float
     db_path: Path
     log_level: str
 
@@ -71,6 +72,9 @@ def load_settings() -> Settings:
         kelly_fraction=_get_float("KELLY_FRACTION", 0.5),
         stop_loss_threshold=_get_float("STOP_LOSS_THRESHOLD", 0.25),
         initial_bankroll_cents=_get_int("INITIAL_BANKROLL_CENTS", 20000),
+        # Max fractional swing applied to a model probability when a fully-rated lineup
+        # is available (lineup_delta in [-1, 1]). 0 disables lineup adjustment entirely.
+        lineup_weight=_get_float("LINEUP_WEIGHT", 0.10),
         db_path=Path(_get_str("DB_PATH", "data/db.sqlite")),
         log_level=_get_str("LOG_LEVEL", "INFO"),
     )

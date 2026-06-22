@@ -29,8 +29,7 @@ class OrderRequest:
     """Concrete order parameters derived from a signal."""
 
     ticker: str
-    action: str  # "buy"
-    side: str  # "yes" / "no"
+    side: str  # V2 API: "bid" (buy YES) or "ask" (sell YES)
     count: int
     limit_price_cents: int
 
@@ -49,10 +48,11 @@ def order_from_signal(signal: Signal) -> OrderRequest | None:
             "Signal %s sized below one contract; skipping", signal["market_ticker"]
         )
         return None
+    # V2 API uses "bid"/"ask" (YES-leg perspective): buying YES = "bid"
+    side_v2 = "bid" if str(signal["side"]).upper() == "YES" else "ask"
     return OrderRequest(
         ticker=signal["market_ticker"],
-        action="buy",
-        side=str(signal["side"]).lower(),
+        side=side_v2,
         count=count,
         limit_price_cents=price_cents,
     )
@@ -64,14 +64,18 @@ def prod_orders_allowed() -> bool:
 
 
 def _extract_order_id(response: object) -> str | None:
-    """Best-effort pull of the order id from a Kalshi create-order response."""
+    """Best-effort pull of the order id from a Kalshi create-order response.
+
+    V2 (/portfolio/events/orders) returns a flat ``{"order_id": "..."}`` dict.
+    The legacy shape nested it under ``{"order": {"order_id": "..."}}``.
+    """
     if not isinstance(response, dict):
         return None
+    if response.get("order_id"):
+        return str(response["order_id"])
     order = response.get("order")
     if isinstance(order, dict) and order.get("order_id"):
         return str(order["order_id"])
-    if response.get("order_id"):
-        return str(response["order_id"])
     return None
 
 
@@ -114,7 +118,6 @@ async def place_order(signal: Signal, *, dry_run: bool = True) -> dict[str, Any]
     )
     response = await kalshi.create_order(
         ticker=request.ticker,
-        action=request.action,
         side=request.side,
         count=request.count,
         yes_price_cents=request.limit_price_cents,

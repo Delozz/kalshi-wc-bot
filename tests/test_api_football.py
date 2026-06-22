@@ -2,7 +2,14 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
+
 from ingestion import api_football
+
+
+def _future_kickoff(hours: float = 48.0) -> str:
+    """Return a UTC ISO kickoff string that is always in the future."""
+    return (datetime.now(timezone.utc) + timedelta(hours=hours)).isoformat()
 
 
 def _raw_fixtures() -> list[dict]:
@@ -10,7 +17,7 @@ def _raw_fixtures() -> list[dict]:
         {
             "fixture": {
                 "id": 101,
-                "date": "2026-06-20T18:00:00+00:00",
+                "date": _future_kickoff(48),
                 "status": {"short": "NS"},
             },
             "teams": {"home": {"name": "USA"}, "away": {"name": "Wales"}},
@@ -44,3 +51,30 @@ def test_upcoming_filters_to_prematch() -> None:
     upcoming = api_football.upcoming(fixtures)
     assert len(upcoming) == 1
     assert upcoming[0].fixture_id == 101
+
+
+def _raw_players() -> list[dict]:
+    return [
+        {  # two stat blocks -> averaged
+            "player": {"id": 1},
+            "statistics": [
+                {"games": {"rating": "7.0"}},
+                {"games": {"rating": "8.0"}},
+            ],
+        },
+        {  # single rating
+            "player": {"id": 2},
+            "statistics": [{"games": {"rating": "6.5"}}],
+        },
+        {  # no numeric rating yet -> omitted (degrades to no signal)
+            "player": {"id": 3},
+            "statistics": [{"games": {"rating": None}}],
+        },
+        {"player": {}, "statistics": []},  # no id -> skipped
+    ]
+
+
+def test_parse_player_ratings_averages_and_skips_unrated() -> None:
+    ratings = api_football._parse_player_ratings(_raw_players())
+    assert ratings == {1: 7.5, 2: 6.5}
+    assert 3 not in ratings  # unrated players never fabricate strength

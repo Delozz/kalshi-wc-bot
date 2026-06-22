@@ -9,6 +9,7 @@ Run: ``python -m dashboard.app``
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timedelta
 from typing import Any
 
 from rich.console import Console
@@ -20,16 +21,39 @@ from execution.portfolio import PortfolioState
 logger = logging.getLogger(__name__)
 
 
-def _recent_signals(limit: int = 5) -> list[dict[str, Any]]:
-    """Read the most recent signals from SQLite, or an empty list on any failure (L9)."""
+def _cycle_cutoff(newest_iso: str, minutes: int) -> str:
+    """ISO timestamp ``minutes`` before ``newest_iso`` (the start of the latest cycle)."""
+    ts = datetime.fromisoformat(newest_iso.replace("Z", "+00:00"))
+    return (ts - timedelta(minutes=minutes)).isoformat()
+
+
+def _recent_signals(
+    limit: int = 5, *, cycle_window_minutes: int = 5
+) -> list[dict[str, Any]]:
+    """Recent signals from the LATEST generation cycle, or [] on any failure (L9).
+
+    Signals are written in clustered per-cycle batches. A global last-N-by-time query
+    lets stale rows from earlier runs — possibly sized against a different bankroll —
+    leak into the live monitor (e.g. a $5.00 bet shown next to a $54 bankroll). Scoping
+    to signals generated within ``cycle_window_minutes`` of the newest one keeps the
+    panel to the current cycle, so every bet size shown reflects the bankroll that
+    actually sized it.
+    """
     try:
         from data.db import connect
 
         with connect() as conn:
+            newest = conn.execute(
+                "SELECT MAX(generated_at) AS ts FROM signals"
+            ).fetchone()
+            if newest is None or newest["ts"] is None:
+                return []
+            cutoff = _cycle_cutoff(str(newest["ts"]), cycle_window_minutes)
             rows = conn.execute(
                 "SELECT market_ticker, model_prob, market_implied, edge, bet_size_cents "
-                "FROM signals ORDER BY generated_at DESC LIMIT ?",
-                (limit,),
+                "FROM signals WHERE generated_at >= ? "
+                "ORDER BY generated_at DESC LIMIT ?",
+                (cutoff, limit),
             ).fetchall()
         return [dict(row) for row in rows]
     except Exception as exc:  # noqa: BLE001 — dashboard must render even with no DB

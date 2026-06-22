@@ -29,8 +29,7 @@ def test_order_from_signal_contract_count() -> None:
     assert request is not None
     assert request.count == 100
     assert request.limit_price_cents == 50
-    assert request.side == "yes"
-    assert request.action == "buy"
+    assert request.side == "bid"  # V2 API: YES side = "bid"
 
 
 def test_order_from_signal_below_one_contract() -> None:
@@ -51,8 +50,12 @@ def test_dry_run_does_not_send() -> None:
 
 
 def test_place_order_extracts_order_id(monkeypatch) -> None:
+    # Opt in to the prod-order path so the test is hermetic regardless of the ambient
+    # KALSHI_ENV in .env (it exercises a real placement, not the L8 demo-first guard).
+    monkeypatch.setenv("KALSHI_ALLOW_PROD_ORDERS", "1")
+
     async def fake_create_order(**_kwargs):
-        return {"order": {"order_id": "abc123", "status": "resting"}}
+        return {"order_id": "abc123", "fill_count": "0.00", "remaining_count": "10.00"}
 
     monkeypatch.setattr(order_manager.kalshi, "create_order", fake_create_order)
     result = asyncio.run(order_manager.place_order(_signal(), dry_run=False))

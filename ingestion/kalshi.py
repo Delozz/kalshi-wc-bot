@@ -37,7 +37,7 @@ DEMO_HOST = "https://demo-api.kalshi.co"
 PUBLIC_DATA_HOST = "https://external-api.kalshi.com"
 PATH_PREFIX = "/trade-api/v2"
 
-WC_SERIES_TICKER = "KXWC26"
+WC_SERIES_TICKER = "KXWCGAME"
 
 
 def _host() -> str:
@@ -158,6 +158,10 @@ async def get_markets(
     No status filter by default — Kalshi WC markets cycle through unopened/open/paused
     between fixtures. Downstream filtering happens via implied_yes_price (returns None
     when no ask exists) and the risk module's liquidity check.
+
+    KXWCGAME markets have 3 legs per match (home-win / tie / away-win) grouped under a
+    shared ticker prefix (e.g. ``KXWCGAME-26JUN27CODUZB``).  Full team names live in
+    ``yes_sub_title``; ``parse_wc_fixtures`` derives upcoming fixtures from this data.
     """
     params: dict[str, str] = {"series_ticker": series_ticker}
     if status is not None:
@@ -197,6 +201,85 @@ def implied_yes_price(market: dict[str, Any]) -> float | None:
     if ask_cents is None:
         return None
     return float(ask_cents) / 100.0
+
+
+def parse_wc_fixtures(markets: list[dict[str, Any]]) -> list[Any]:
+    """Derive upcoming WC fixtures from KXWCGAME markets.
+
+    Used as a fallback when API-Football free tier can't serve the 2026 season.
+    Ticker format: ``KXWCGAME-{YY}{MON}{DD}{HOME3}{AWAY3}-{OUTCOME}`` where OUTCOME is a
+    3-char team abbreviation (home or away win) or ``TIE``.  The ``yes_sub_title`` field
+    carries the full English country name that maps to canonical team names.
+
+    Returns a list of ``ingestion.api_football.Fixture`` objects for matches that have not
+    yet kicked off (within a 3-hour grace window).
+    """
+    from datetime import datetime, timedelta, timezone
+
+    from features.teams import canonical
+    from ingestion.api_football import Fixture  # local import avoids circular dep
+
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for market in markets:
+        ticker = str(market.get("ticker", ""))
+        if not ticker.startswith("KXWCGAME-"):
+            continue
+        prefix = ticker.rsplit("-", 1)[0]  # e.g. "KXWCGAME-26JUN27CODUZB"
+        groups.setdefault(prefix, []).append(market)
+
+    now = datetime.now(timezone.utc)
+    fixtures: list[Fixture] = []
+
+    for prefix, group in groups.items():
+        # Parse date: KXWCGAME-26JUN27CODUZB -> date_part = "26JUN27"
+        try:
+            inner = prefix.split("-", 1)[1]  # "26JUN27CODUZB"
+            date_str = inner[:7]             # "26JUN27"
+            kickoff = datetime.strptime(f"20{date_str}", "%Y%b%d").replace(
+                tzinfo=timezone.utc
+            )
+        except (ValueError, IndexError):
+            continue
+
+        if kickoff < now - timedelta(hours=3):
+            continue  # match already started or finished
+
+        # Abbrev block: "CODUZB" -> home_abbrev="COD", away_abbrev="UZB"
+        try:
+            abbrev_part = inner[7:]  # e.g. "CODUZB"
+            home_abbrev = abbrev_part[:3].upper()
+            away_abbrev = abbrev_part[3:6].upper()
+        except IndexError:
+            continue
+
+        home_name: str | None = None
+        away_name: str | None = None
+        for m in group:
+            suffix = m.get("ticker", "").rsplit("-", 1)[-1].upper()
+            sub = str(m.get("yes_sub_title", ""))
+            if not sub or sub.lower() in ("tie", "draw"):
+                continue
+            if suffix == home_abbrev:
+                home_name = canonical(sub)
+            elif suffix == away_abbrev:
+                away_name = canonical(sub)
+
+        if not home_name or not away_name:
+            continue
+
+        fixtures.append(
+            Fixture(
+                fixture_id=abs(hash(prefix)) % (10**9),
+                kickoff_utc=kickoff.isoformat() + "Z",
+                status="NS",
+                home_team=home_name,
+                away_team=away_name,
+                round=None,
+            )
+        )
+
+    logger.info("Parsed %d upcoming WC fixtures from Kalshi KXWCGAME markets", len(fixtures))
+    return fixtures
 
 
 # -------------------------------------------------------- authenticated endpoints
@@ -245,30 +328,32 @@ async def get_positions() -> dict[str, Any] | None:
 async def create_order(
     *,
     ticker: str,
-    action: str,
     side: str,
     count: int,
     yes_price_cents: int,
-    order_type: str = "limit",
     client_order_id: str | None = None,
 ) -> dict[str, Any] | None:
-    """Authenticated low-level order placement. Use order_manager for the demo guard (L8)."""
+    """Authenticated low-level order placement (V2 API). Use order_manager for the demo guard (L8).
+
+    ``side`` must be "bid" (buy YES) or "ask" (sell YES). Price and count are
+    converted to the V2 fixed-point string format required by /portfolio/events/orders.
+    """
     body: dict[str, Any] = {
         "ticker": ticker,
-        "action": action,
         "side": side,
-        "count": count,
-        "type": order_type,
-        "yes_price": yes_price_cents,
+        "count": f"{count:.2f}",
+        "price": f"{yes_price_cents / 100:.4f}",
+        "time_in_force": "good_till_canceled",
+        "self_trade_prevention_type": "taker_at_cross",
     }
     if client_order_id is not None:
         body["client_order_id"] = client_order_id
-    return await _authed_request("POST", "/portfolio/orders", json_body=body)
+    return await _authed_request("POST", "/portfolio/events/orders", json_body=body)
 
 
 async def cancel_order(order_id: str) -> dict[str, Any] | None:
-    """Authenticated: cancel a resting order."""
-    return await _authed_request("DELETE", f"/portfolio/orders/{order_id}")
+    """Authenticated: cancel a resting order (V2 endpoint)."""
+    return await _authed_request("DELETE", f"/portfolio/events/orders/{order_id}")
 
 
 async def get_order(order_id: str) -> dict[str, Any] | None:
