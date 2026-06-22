@@ -16,13 +16,13 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import pandas as pd
 
 from config import settings
-from features import elo
+from features import elo, lineup
 from ingestion.api_football import Fixture
 from model import predict as predict_mod
 from model.dataset import WC_HOSTS, build_live_features
@@ -68,34 +68,64 @@ def _open_interest(markets: list[dict[str, Any]], ticker: str) -> float:
 def default_outcome_resolver(
     fixture: Fixture, markets: list[dict[str, Any]]
 ) -> dict[str, tuple[str, float]]:
-    """Best-effort: map each outcome (H/D/A) to its Kalshi (ticker, YES price).
+    """Map each outcome (H/D/A) to its Kalshi (ticker, YES price).
 
-    A market belongs to this fixture if its text mentions both teams. The YES outcome is
-    read from ``yes_sub_title``: the home team -> H, the away team -> A, "draw"/"tie" ->
-    D. Confirm against the real KXWC26 market structure before live trading.
+    Groups markets by their shared event prefix (the ticker portion before the final '-'),
+    which is how KXWCGAME structures its 3-leg markets.  A group belongs to this fixture
+    when both team names appear in the ``yes_sub_title`` fields of the group's markets.
+    Falls back to deprecated ``title``/``subtitle`` text search for other market formats.
     """
+    from features.teams import canonical
     from ingestion.kalshi import implied_yes_price
 
     home = fixture.home_team.lower()
     away = fixture.away_team.lower()
     resolved: dict[str, tuple[str, float]] = {}
+
+    # Group by event_ticker (explicit) or by ticker prefix (KXWCGAME convention).
+    groups: dict[str, list[dict[str, Any]]] = {}
     for market in markets:
-        text = " ".join(
-            str(market.get(key, "")) for key in ("title", "subtitle", "ticker")
-        ).lower()
-        if home not in text or away not in text:
+        key = str(
+            market.get("event_ticker") or market.get("ticker", "").rsplit("-", 1)[0]
+        )
+        groups.setdefault(key, []).append(market)
+
+    for _key, group in groups.items():
+        # Apply canonical() so "Turkiye"→"Turkey", "Congo DR"→"DR Congo", etc.
+        # Fixture names are already canonical; yes_sub_title values are raw Kalshi strings.
+        canonical_subs = [
+            canonical(str(m.get("yes_sub_title", ""))).lower() for m in group
+        ]
+        has_home = any(home in s for s in canonical_subs)
+        has_away = any(away in s for s in canonical_subs)
+
+        if not (has_home and has_away):
+            # Fallback: deprecated title/subtitle text for non-KXWCGAME formats.
+            text = " ".join(
+                str(m.get(k, "")) for m in group for k in ("title", "subtitle")
+            ).lower()
+            has_home = home in text
+            has_away = away in text
+
+        if not (has_home and has_away):
             continue
-        price = implied_yes_price(market)
-        if price is None:
-            continue
-        ticker = str(market.get("ticker", ""))
-        yes_sub = str(market.get("yes_sub_title", "")).lower()
-        if "draw" in yes_sub or "tie" in yes_sub:
-            resolved["D"] = (ticker, price)
-        elif home in yes_sub:
-            resolved["H"] = (ticker, price)
-        elif away in yes_sub:
-            resolved["A"] = (ticker, price)
+
+        for market in group:
+            price = implied_yes_price(market)
+            if price is None:
+                continue
+            ticker = str(market.get("ticker", ""))
+            yes_sub = canonical(str(market.get("yes_sub_title", ""))).lower()
+            if "draw" in yes_sub or "tie" in yes_sub:
+                resolved["D"] = (ticker, price)
+            elif home in yes_sub:
+                resolved["H"] = (ticker, price)
+            elif away in yes_sub:
+                resolved["A"] = (ticker, price)
+
+        if resolved:
+            break  # found the matching event group
+
     return resolved
 
 
@@ -113,8 +143,17 @@ def generate_signals(
     resolver: MarketResolver = default_outcome_resolver,
     hosts_by_year: dict[int, set[str]] | None = None,
     threshold: float | None = None,
+    lineups_by_fixture: (
+        dict[int, tuple[dict[str, Any] | None, dict[str, Any] | None]] | None
+    ) = None,
 ) -> list[Signal]:
-    """Produce sized, risk-checked signals across all outcomes for the given fixtures."""
+    """Produce sized, risk-checked signals across all outcomes for the given fixtures.
+
+    ``lineups_by_fixture`` (optional) maps a fixture id to its ``(home_lineup,
+    away_lineup)`` API-Football payloads. When present, the resulting home-minus-away
+    strength delta nudges the model probability per outcome (positive favours home, so
+    it is negated for the away leg and zeroed for the draw). Absent or unannounced
+    lineups leave a 0.0 delta — identical to the pre-lineup behaviour."""
     hosts_by_year = hosts_by_year or WC_HOSTS
     bankroll = bankroll_cents / 100.0
     peak = (
@@ -143,10 +182,24 @@ def generate_signals(
         )
         probs = predict_mod.predict_outcome(bundle, features)
 
+        # Home-minus-away starting-XI strength (0.0 when lineups aren't announced).
+        raw_lineup_delta = 0.0
+        if lineups_by_fixture:
+            pair = lineups_by_fixture.get(fixture.fixture_id)
+            if pair is not None:
+                raw_lineup_delta = lineup.lineup_strength_delta(pair[0], pair[1])
+
         for outcome, (ticker, yes_price) in outcome_markets.items():
             model_prob = probs.get(outcome)
             if model_prob is None:
                 continue
+            # Sign the delta for this leg: +home, -away, 0 for the (ambiguous) draw.
+            if outcome == "H":
+                signed_delta = raw_lineup_delta
+            elif outcome == "A":
+                signed_delta = -raw_lineup_delta
+            else:
+                signed_delta = 0.0
             signal = edge_mod.build_signal(
                 match_id=(
                     f"{fixture.fixture_id}:{outcome}:"
@@ -157,6 +210,7 @@ def generate_signals(
                 kalshi_yes_price=yes_price,
                 bankroll=bankroll,
                 threshold=threshold,
+                lineup_delta=signed_delta,
             )
             if signal is None:
                 continue
@@ -208,6 +262,75 @@ def _persist(signal: Signal, result: dict[str, Any] | None, *, dry_run: bool) ->
         )
 
 
+async def _attach_player_ratings(entry: dict[str, Any]) -> None:
+    """Inject each starting player's season rating into a lineup entry, in place.
+
+    The lineup endpoint returns the XI but no strength signal, so we fold in season
+    ratings from ``/players``. Players the rating source doesn't cover keep no ``rating``
+    key and are simply skipped by ``lineup_strength_delta``. Any failure is swallowed so
+    one team never blocks the run (L9)."""
+    from ingestion import api_football
+
+    team_id = (entry.get("team") or {}).get("id")
+    if team_id is None:
+        return
+    try:
+        ratings = await api_football.fetch_squad_ratings(int(team_id))
+    except Exception as exc:  # noqa: BLE001 — L9: a rating gap must not crash the run
+        logger.warning("Squad-rating fetch failed for team %s: %s", team_id, exc)
+        return
+    for slot in entry.get("startXI") or []:
+        player = (slot or {}).get("player") or {}
+        pid = player.get("id")
+        if pid is not None and int(pid) in ratings:
+            player["rating"] = ratings[int(pid)]
+
+
+async def _fetch_lineups(
+    fixtures: list[Fixture],
+) -> dict[int, tuple[dict[str, Any] | None, dict[str, Any] | None]]:
+    """Fetch announced lineups for fixtures kicking off within the next 3 hours.
+
+    Lineups are typically released ~1h before kickoff, so we only spend API calls inside
+    a tight pre-match window; matches further out (or already started) are skipped and
+    simply carry no lineup signal. Each fixture maps to ``(home_lineup, away_lineup)``,
+    matched by canonical team name. Any fetch failure is swallowed so one bad fixture
+    never blocks the rest (L9)."""
+    from features.teams import canonical
+    from ingestion import api_football
+
+    now = datetime.now(timezone.utc)
+    out: dict[int, tuple[dict[str, Any] | None, dict[str, Any] | None]] = {}
+    for fixture in fixtures:
+        try:
+            kickoff = datetime.fromisoformat(fixture.kickoff_utc.replace("Z", "+00:00"))
+        except (ValueError, AttributeError):
+            continue
+        if not (now <= kickoff <= now + timedelta(hours=3)):
+            continue
+        try:
+            raw = await api_football.fetch_lineups(fixture.fixture_id)
+        except Exception as exc:  # noqa: BLE001 — L9: never let one fixture crash run
+            logger.warning("Lineup fetch failed for %s: %s", fixture.fixture_id, exc)
+            continue
+        if not raw:
+            continue
+        home_lu: dict[str, Any] | None = None
+        away_lu: dict[str, Any] | None = None
+        for entry in raw:
+            await _attach_player_ratings(entry)
+            name = canonical(str((entry.get("team") or {}).get("name", "")))
+            if name == fixture.home_team:
+                home_lu = entry
+            elif name == fixture.away_team:
+                away_lu = entry
+        if home_lu or away_lu:
+            out[fixture.fixture_id] = (home_lu, away_lu)
+    if out:
+        logger.info("Fetched announced lineups for %d fixture(s)", len(out))
+    return out
+
+
 async def run_live(*, dry_run: bool = True) -> list[Signal]:
     """Fetch live inputs, generate signals, and route them (dry-run by default, L8)."""
     from execution import order_manager, portfolio
@@ -219,23 +342,33 @@ async def run_live(*, dry_run: bool = True) -> list[Signal]:
 
     raw_fixtures = await api_football.fetch_fixtures()
     fixtures = api_football.upcoming(api_football.parse_fixtures(raw_fixtures))
-    markets = await kalshi.get_markets()
-    if not fixtures or not markets:
-        logger.warning(
-            "No fixtures (%d) or markets (%d); nothing to do",
-            len(fixtures),
-            len(markets),
-        )
+    # Lineups are only fetchable for real API-Football fixture ids; the Kalshi fallback
+    # below synthesises ids, so lineup enrichment is skipped on that path.
+    fixtures_have_real_ids = bool(fixtures)
+    markets = await kalshi.get_markets(status="open")
+    if not markets:
+        logger.warning("No Kalshi markets; nothing to do")
+        return []
+    if not fixtures:
+        # API-Football free tier blocks 2026 season — derive fixtures from KXWCGAME
+        # markets instead (team names live in yes_sub_title; dates in ticker).
+        fixtures = kalshi.parse_wc_fixtures(markets)
+    if not fixtures:
+        logger.warning("No upcoming WC fixtures from any source; nothing to do")
         return []
 
     # Live inference uses ALL known results as feature history. The 2022 holdout rule
     # (L2) governs model DEV/EVAL — using past results as inputs for a 2026 prediction
     # is legitimate, not look-ahead.
-    history = international_results.load()
+    history = await international_results.load_async()
     ratings = elo.final_ratings(history, use_tournament_k=True)
 
     state = await portfolio.sync_from_kalshi(
         fallback_bankroll_cents=settings.initial_bankroll_cents
+    )
+
+    lineups_by_fixture = (
+        await _fetch_lineups(fixtures) if fixtures_have_real_ids else {}
     )
 
     signals = generate_signals(
@@ -248,6 +381,7 @@ async def run_live(*, dry_run: bool = True) -> list[Signal]:
         peak_bankroll_cents=state.peak_bankroll_cents,
         open_exposure_cents=state.exposure_cents,
         n_open=state.open_count,
+        lineups_by_fixture=lineups_by_fixture,
     )
     for signal in signals:
         result = await order_manager.place_order(signal, dry_run=dry_run)

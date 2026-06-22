@@ -97,6 +97,30 @@ def _normalize(raw: pd.DataFrame) -> pd.DataFrame:
     return out.sort_values("date").reset_index(drop=True)
 
 
+async def load_async(*, max_date: str | pd.Timestamp | None = None) -> pd.DataFrame:
+    """Async variant of ``load()`` for use inside async contexts (e.g. run_live).
+
+    Calls ``_download`` directly so it never nests ``asyncio.run()`` inside a running
+    event loop, which would raise RuntimeError.
+    """
+    async with httpx.AsyncClient(follow_redirects=True) as client:
+        path = await _download(client)
+    if path is None:
+        logger.error("No international results available; returning empty frame")
+        return pd.DataFrame()
+    try:
+        raw = pd.read_csv(path)
+    except (OSError, pd.errors.ParserError) as exc:  # L9
+        logger.error("Failed to parse %s: %s", path, exc)
+        return pd.DataFrame()
+    df = _normalize(raw)
+    if max_date is not None:
+        cutoff = pd.Timestamp(max_date)
+        df = df[df["date"] < cutoff].reset_index(drop=True)
+        logger.info("Filtered to %d matches before %s", len(df), cutoff.date())
+    return df
+
+
 def load(*, max_date: str | pd.Timestamp | None = None) -> pd.DataFrame:
     """Download, cache, and normalize the international results.
 
