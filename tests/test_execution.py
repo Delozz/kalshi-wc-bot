@@ -77,3 +77,26 @@ def test_portfolio_exposure_and_peak() -> None:
     assert state.peak_bankroll_cents == 25000
     state.update_bankroll(22000)
     assert state.peak_bankroll_cents == 25000  # peak ratchets, does not fall
+
+
+def test_ratchet_peak_lifts_to_real_high_water() -> None:
+    # Sync sets peak == current (4691); folding in the real ledger peak (5410) exposes
+    # the drawdown the stop-loss must see.
+    state = portfolio.PortfolioState(bankroll_cents=4691, peak_bankroll_cents=4691)
+    portfolio.ratchet_peak(state, 5410)
+    assert state.peak_bankroll_cents == 5410
+
+
+def test_ratchet_peak_current_above_history_sets_new_peak() -> None:
+    state = portfolio.PortfolioState(bankroll_cents=6000, peak_bankroll_cents=6000)
+    portfolio.ratchet_peak(state, 5410)
+    assert state.peak_bankroll_cents == 6000
+
+
+def test_ratchet_peak_ignores_fallback_balance() -> None:
+    # A fallback (placeholder) balance must never become the peak — only real history.
+    state = portfolio.PortfolioState(
+        bankroll_cents=10000, peak_bankroll_cents=10000, balance_is_fallback=True
+    )
+    portfolio.ratchet_peak(state, 5410)
+    assert state.peak_bankroll_cents == 5410

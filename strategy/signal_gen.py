@@ -378,6 +378,17 @@ async def run_live(*, dry_run: bool = True) -> list[Signal]:
     state = await portfolio.sync_from_kalshi(
         fallback_bankroll_cents=settings.initial_bankroll_cents
     )
+    # Lift peak to the real high-water mark from the ledger so the stop-loss measures a
+    # genuine drawdown (sync alone sets peak == current balance). L9: never crash on this.
+    try:
+        from data.db import connect, real_peak_bankroll
+
+        with connect() as conn:
+            portfolio.ratchet_peak(state, real_peak_bankroll(conn))
+    except (
+        Exception
+    ) as exc:  # noqa: BLE001 — peak read must not block signal generation
+        logger.warning("Could not read historical peak: %s", exc)
 
     lineups_by_fixture = (
         await _fetch_lineups(fixtures) if fixtures_have_real_ids else {}

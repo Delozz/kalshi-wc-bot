@@ -126,12 +126,13 @@ async def _settle_finished() -> None:
             )
     # Bankroll is authoritative from Kalshi (settlement cash is already reflected in the
     # account balance); re-sync so the ledger matches reality rather than drifting on an
-    # additive estimate.
+    # additive estimate. A fallback balance is labelled so it never pollutes the peak.
     state = await portfolio.sync_from_kalshi(
         fallback_bankroll_cents=settings.initial_bankroll_cents
     )
+    event = "sync_fallback" if state.balance_is_fallback else "sync"
     with connect() as conn:
-        record_bankroll(conn, state.bankroll_cents, "sync")
+        record_bankroll(conn, state.bankroll_cents, event)
 
 
 def job_update_bankroll() -> None:
@@ -144,7 +145,7 @@ def job_update_bankroll() -> None:
 
 
 async def _update_bankroll() -> None:
-    from data.db import connect, init_db, record_bankroll
+    from data.db import connect, init_db, real_peak_bankroll, record_bankroll
     from execution import portfolio
     from strategy.risk import stop_loss_triggered
 
@@ -152,8 +153,12 @@ async def _update_bankroll() -> None:
         fallback_bankroll_cents=settings.initial_bankroll_cents
     )
     init_db()
+    event = "sync_fallback" if state.balance_is_fallback else "sync"
     with connect() as conn:
-        record_bankroll(conn, state.bankroll_cents, "sync")
+        # Ratchet against prior real syncs, then record this balance under the event label
+        # that keeps fallbacks out of the high-water mark.
+        portfolio.ratchet_peak(state, real_peak_bankroll(conn))
+        record_bankroll(conn, state.bankroll_cents, event)
     if stop_loss_triggered(
         state.bankroll_cents / 100.0, state.peak_bankroll_cents / 100.0
     ):

@@ -94,6 +94,20 @@ def test_settle_fixture_draw_outcome_wins(conn) -> None:
     assert db.latest_bankroll(conn) == 20000  # settlement does not touch the ledger
 
 
+def test_real_peak_ignores_fallback_rows(conn) -> None:
+    # Fallback syncs (placeholder bankroll when Kalshi balance can't be read) must not
+    # count toward the stop-loss high-water mark.
+    db.record_bankroll(conn, 20000, "sync_fallback")  # fake default — must be ignored
+    db.record_bankroll(conn, 5410, "sync")  # real high-water
+    db.record_bankroll(conn, 4691, "sync")  # real, after a loss
+    assert db.real_peak_bankroll(conn) == 5410
+
+
+def test_real_peak_none_without_real_sync(conn) -> None:
+    db.record_bankroll(conn, 10000, "sync_fallback")
+    assert db.real_peak_bankroll(conn) is None
+
+
 def test_settle_fixture_skips_unfilled(conn) -> None:
     db.record_bankroll(conn, 20000, "deposit")
     signal_id = db.log_signal(conn, _signal())
