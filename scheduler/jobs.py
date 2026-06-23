@@ -105,8 +105,8 @@ def job_settle_positions() -> None:
 
 
 async def _settle_finished() -> None:
-    from data.db import connect, init_db
-    from execution import settlement
+    from data.db import connect, init_db, record_bankroll
+    from execution import portfolio, settlement
     from ingestion import api_football
 
     raw = await api_football.fetch_fixtures()
@@ -124,6 +124,14 @@ async def _settle_finished() -> None:
             logger.info(
                 "Settled fixture %s (%s): pnl=%dc", fixture.fixture_id, result, pnl
             )
+    # Bankroll is authoritative from Kalshi (settlement cash is already reflected in the
+    # account balance); re-sync so the ledger matches reality rather than drifting on an
+    # additive estimate.
+    state = await portfolio.sync_from_kalshi(
+        fallback_bankroll_cents=settings.initial_bankroll_cents
+    )
+    with connect() as conn:
+        record_bankroll(conn, state.bankroll_cents, "sync")
 
 
 def job_update_bankroll() -> None:

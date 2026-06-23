@@ -197,3 +197,47 @@ async def await_fill(
     logger.warning("Order %s unfilled after %ds; cancelling", order_id, timeout_s)
     await cancel_fn(order_id)
     return "timeout"
+
+
+def _extract_fill_price_cents(order: dict[str, Any], fallback_cents: int) -> int:
+    """Best-effort average fill price (cents) from a Kalshi order object.
+
+    Tries known cents fields, then V2 dollar-string fields, and finally falls back to the
+    limit price — which equals the fill for a marketable limit placed at the ask (PRD 7.3).
+    """
+    for key in ("average_fill_price", "avg_fill_price", "yes_price"):
+        val = order.get(key)
+        if val is not None:
+            try:
+                return round(float(val))
+            except (TypeError, ValueError):
+                pass
+    for key in ("average_fill_price_dollars", "yes_price_dollars"):
+        val = order.get(key)
+        if val is not None:
+            try:
+                return round(float(val) * 100)
+            except (TypeError, ValueError):
+                pass
+    return fallback_cents
+
+
+async def confirm_fill(
+    order_id: str,
+    *,
+    fallback_price_cents: int,
+    get_order_fn: Any = None,
+    **await_kwargs: Any,
+) -> tuple[str, int | None]:
+    """Wait for an order to resolve and report ``(status, filled_price_cents)``.
+
+    Returns the average fill price (cents) only when the order filled; otherwise the price
+    is None. ``get_order_fn`` and any ``await_fill`` kwargs are injectable for testing.
+    """
+    status = await await_fill(order_id, **await_kwargs)
+    if status != "filled":
+        return status, None
+    get_order_fn = get_order_fn or kalshi.get_order
+    resp = await get_order_fn(order_id)
+    order = (resp or {}).get("order") or {}
+    return "filled", _extract_fill_price_cents(order, fallback_price_cents)

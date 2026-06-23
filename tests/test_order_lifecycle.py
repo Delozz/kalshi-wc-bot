@@ -70,3 +70,59 @@ def test_await_fill_times_out_and_cancels() -> None:
     )
     assert result == "timeout"
     assert cancelled == ["ord1"]
+
+
+def test_extract_fill_price_prefers_reported_then_fallback() -> None:
+    assert order_manager._extract_fill_price_cents({"yes_price": "30"}, 50) == 30
+    assert (
+        order_manager._extract_fill_price_cents({"yes_price_dollars": "0.30"}, 50) == 30
+    )
+    assert order_manager._extract_fill_price_cents({}, 50) == 50  # falls back to limit
+
+
+def test_confirm_fill_returns_status_and_price() -> None:
+    async def status_fn(_: str) -> str:
+        return "filled"
+
+    async def sleeper(_: int) -> None:
+        return None
+
+    async def get_order_fn(_: str) -> dict:
+        return {"order": {"status": "executed", "yes_price": "8"}}
+
+    status, price = asyncio.run(
+        order_manager.confirm_fill(
+            "ord1",
+            fallback_price_cents=50,
+            get_order_fn=get_order_fn,
+            status_fn=status_fn,
+            sleeper=sleeper,
+        )
+    )
+    assert status == "filled"
+    assert price == 8
+
+
+def test_confirm_fill_timeout_has_no_price() -> None:
+    async def status_fn(_: str) -> str:
+        return "resting"
+
+    async def cancel_fn(_: str) -> None:
+        return None
+
+    async def sleeper(_: int) -> None:
+        return None
+
+    status, price = asyncio.run(
+        order_manager.confirm_fill(
+            "ord1",
+            fallback_price_cents=50,
+            status_fn=status_fn,
+            cancel_fn=cancel_fn,
+            sleeper=sleeper,
+            timeout_s=2,
+            interval_s=1,
+        )
+    )
+    assert status == "timeout"
+    assert price is None
