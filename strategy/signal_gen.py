@@ -161,7 +161,10 @@ def generate_signals(
     ) / 100.0
     exposure = open_exposure_cents / 100.0
 
-    signals: list[Signal] = []
+    # Phase 1: build every candidate signal that clears the edge threshold, across all
+    # fixtures/outcomes, WITHOUT applying the sequential position/exposure caps yet. We
+    # tag each with its ticker so the liquidity check can run in phase 2.
+    candidates: list[tuple[Signal, str]] = []
     for fixture in fixtures:
         outcome_markets = resolver(fixture, markets)
         if not outcome_markets:
@@ -214,22 +217,31 @@ def generate_signals(
             )
             if signal is None:
                 continue
+            candidates.append((signal, ticker))
 
-            decision = risk.check_all(
-                bankroll=bankroll,
-                peak_bankroll=peak,
-                open_exposure=exposure,
-                new_bet=signal["bet_size_cents"] / 100.0,
-                n_open=n_open,
-                open_interest=_open_interest(markets, ticker),
-            )
-            if not decision.approved:
-                logger.info("Signal %s rejected by risk: %s", ticker, decision.reason)
-                continue
+    # Phase 2: rank candidates by edge (best first) so the strongest bets claim the
+    # scarce position/exposure slots — not whichever fixture happened to be parsed first
+    # (previously this followed API-Football's chronological order, starving high-edge
+    # later matches once max_positions filled).
+    candidates.sort(key=lambda c: c[0]["edge"], reverse=True)
 
-            signals.append(signal)
-            exposure += signal["bet_size_cents"] / 100.0
-            n_open += 1
+    signals: list[Signal] = []
+    for signal, ticker in candidates:
+        decision = risk.check_all(
+            bankroll=bankroll,
+            peak_bankroll=peak,
+            open_exposure=exposure,
+            new_bet=signal["bet_size_cents"] / 100.0,
+            n_open=n_open,
+            open_interest=_open_interest(markets, ticker),
+        )
+        if not decision.approved:
+            logger.info("Signal %s rejected by risk: %s", ticker, decision.reason)
+            continue
+
+        signals.append(signal)
+        exposure += signal["bet_size_cents"] / 100.0
+        n_open += 1
 
     logger.info("Generated %d signals from %d fixtures", len(signals), len(fixtures))
     return signals
