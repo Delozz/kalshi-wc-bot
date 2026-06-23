@@ -185,6 +185,19 @@ def latest_bankroll(conn: sqlite3.Connection) -> int | None:
     return int(row["balance_cents"]) if row else None
 
 
+def real_peak_bankroll(conn: sqlite3.Connection) -> int | None:
+    """Highest *real* synced balance (cents) — the stop-loss high-water mark.
+
+    Only ``event = 'sync'`` rows count: ``'sync_fallback'`` entries hold a placeholder
+    bankroll used when the Kalshi balance could not be read, and must never inflate the
+    peak the drawdown guard measures against. None if there is no real sync yet.
+    """
+    row = conn.execute(
+        "SELECT MAX(balance_cents) AS peak FROM bankroll_log WHERE event = 'sync'"
+    ).fetchone()
+    return int(row["peak"]) if row and row["peak"] is not None else None
+
+
 def unsettled_orders_for_fixture(
     conn: sqlite3.Connection, fixture_id: str
 ) -> list[sqlite3.Row]:

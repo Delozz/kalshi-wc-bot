@@ -1,8 +1,14 @@
 """Settlement (execution/settlement.py).
 
-Closes the trade lifecycle: given a match outcome, settle each YES order on it, mark the
-orders settled with realized P&L, and post the new balance to the bankroll ledger. A YES
-contract bought at ``filled_price`` cents pays 100c on a win and 0c on a loss.
+Closes the trade lifecycle: given a match outcome, settle each YES order on it and mark
+the orders settled with realized P&L. A YES contract bought at ``filled_price`` cents pays
+100c on a win and 0c on a loss.
+
+The bankroll ledger is intentionally NOT updated here. Live bankroll is authoritative from
+Kalshi's balance endpoint (purchase cash leaves the account at fill time), so the settle
+job re-syncs the real balance after settling — see ``scheduler.jobs._settle_finished``.
+Adjusting the ledger additively here would double-count the cost basis that the synced
+balance already reflects. ``pnl_cents`` on each order is the per-trade record for metrics.
 """
 
 from __future__ import annotations
@@ -11,12 +17,7 @@ import logging
 import sqlite3
 from datetime import datetime, timezone
 
-from data.db import (
-    latest_bankroll,
-    record_bankroll,
-    settle_order,
-    unsettled_orders_for_fixture,
-)
+from data.db import settle_order, unsettled_orders_for_fixture
 
 logger = logging.getLogger(__name__)
 
@@ -36,14 +37,13 @@ def settle_position(
     contracts: int,
     won: bool,
 ) -> int:
-    """Settle one order: write P&L, mark it settled, and update the bankroll ledger."""
+    """Settle one order: record realized P&L and mark it settled. Returns the P&L cents.
+
+    Does not touch the bankroll ledger (Kalshi balance is authoritative; the settle job
+    re-syncs it afterward).
+    """
     pnl = compute_pnl_cents(filled_price_cents, contracts, won)
     settle_order(conn, order_id, settled_at=datetime.now(timezone.utc), pnl_cents=pnl)
-    base = latest_bankroll(conn)
-    if base is not None:
-        record_bankroll(conn, base + pnl, "win" if pnl >= 0 else "loss")
-    else:
-        logger.warning("No bankroll baseline to update for settled order %s", order_id)
     logger.info("Settled %s: pnl=%dc (won=%s)", order_id, pnl, won)
     return pnl
 

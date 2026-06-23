@@ -234,7 +234,7 @@ def parse_wc_fixtures(markets: list[dict[str, Any]]) -> list[Any]:
         # Parse date: KXWCGAME-26JUN27CODUZB -> date_part = "26JUN27"
         try:
             inner = prefix.split("-", 1)[1]  # "26JUN27CODUZB"
-            date_str = inner[:7]             # "26JUN27"
+            date_str = inner[:7]  # "26JUN27"
             kickoff = datetime.strptime(f"20{date_str}", "%Y%b%d").replace(
                 tzinfo=timezone.utc
             )
@@ -278,7 +278,9 @@ def parse_wc_fixtures(markets: list[dict[str, Any]]) -> list[Any]:
             )
         )
 
-    logger.info("Parsed %d upcoming WC fixtures from Kalshi KXWCGAME markets", len(fixtures))
+    logger.info(
+        "Parsed %d upcoming WC fixtures from Kalshi KXWCGAME markets", len(fixtures)
+    )
     return fixtures
 
 
@@ -359,3 +361,19 @@ async def cancel_order(order_id: str) -> dict[str, Any] | None:
 async def get_order(order_id: str) -> dict[str, Any] | None:
     """Authenticated: fetch a single order's current state."""
     return await _authed_request("GET", f"/portfolio/orders/{order_id}")
+
+
+async def get_fills(
+    *, order_id: str | None = None, ticker: str | None = None, limit: int = 100
+) -> dict[str, Any] | None:
+    """Authenticated: trade fills, optionally filtered by order or market.
+
+    Returns ``{"fills": [...], "cursor": ...}``; each fill carries ``yes_price_dollars``,
+    ``count_fp`` and ``fee_cost`` — the ground truth for realized fill price and fees.
+    """
+    params: dict[str, Any] = {"limit": limit}
+    if order_id is not None:
+        params["order_id"] = order_id
+    if ticker is not None:
+        params["ticker"] = ticker
+    return await _authed_request("GET", "/portfolio/fills", params=params)

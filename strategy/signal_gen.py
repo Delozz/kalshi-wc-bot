@@ -378,6 +378,17 @@ async def run_live(*, dry_run: bool = True) -> list[Signal]:
     state = await portfolio.sync_from_kalshi(
         fallback_bankroll_cents=settings.initial_bankroll_cents
     )
+    # Lift peak to the real high-water mark from the ledger so the stop-loss measures a
+    # genuine drawdown (sync alone sets peak == current balance). L9: never crash on this.
+    try:
+        from data.db import connect, real_peak_bankroll
+
+        with connect() as conn:
+            portfolio.ratchet_peak(state, real_peak_bankroll(conn))
+    except (
+        Exception
+    ) as exc:  # noqa: BLE001 — peak read must not block signal generation
+        logger.warning("Could not read historical peak: %s", exc)
 
     lineups_by_fixture = (
         await _fetch_lineups(fixtures) if fixtures_have_real_ids else {}
@@ -398,4 +409,39 @@ async def run_live(*, dry_run: bool = True) -> list[Signal]:
     for signal in signals:
         result = await order_manager.place_order(signal, dry_run=dry_run)
         _persist(signal, result, dry_run=dry_run)
+        if not dry_run and result and result.get("order_id"):
+            await _finalize_fill(str(result["order_id"]), result["request"])
     return signals
+
+
+async def _finalize_fill(order_id: str, request: Any) -> None:
+    """Poll a live order to its fill and record the price/status (closes the place->fill
+    gap that previously left orders stuck at 'pending', unsettleable). Any failure is
+    swallowed so one order never blocks the rest (L9); the order simply stays 'pending'
+    and the next settle/sync pass can reconcile it."""
+    from execution import order_manager
+
+    try:
+        status, fill_cents = await order_manager.confirm_fill(
+            order_id, fallback_price_cents=request.limit_price_cents
+        )
+    except (
+        Exception
+    ) as exc:  # noqa: BLE001 — L9: a fill-poll failure must not crash run
+        logger.warning("Fill confirmation failed for %s: %s", order_id, exc)
+        return
+
+    try:
+        from data.db import connect, update_order_status
+
+        with connect() as conn:
+            update_order_status(
+                conn,
+                order_id,
+                status,
+                filled_price=(fill_cents / 100.0 if fill_cents is not None else None),
+            )
+    except Exception as exc:  # noqa: BLE001 — L9: persistence must not crash run
+        logger.warning("Could not record fill for %s: %s", order_id, exc)
+        return
+    logger.info("Order %s resolved: %s (fill=%s c)", order_id, status, fill_cents)

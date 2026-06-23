@@ -50,8 +50,8 @@ def _recent_signals(
                 return []
             cutoff = _cycle_cutoff(str(newest["ts"]), cycle_window_minutes)
             rows = conn.execute(
-                "SELECT market_ticker, model_prob, market_implied, edge, bet_size_cents "
-                "FROM signals WHERE generated_at >= ? "
+                "SELECT market_ticker, match_id, model_prob, market_implied, edge, "
+                "bet_size_cents FROM signals WHERE generated_at >= ? "
                 "ORDER BY generated_at DESC LIMIT ?",
                 (cutoff, limit),
             ).fetchall()
@@ -59,6 +59,42 @@ def _recent_signals(
     except Exception as exc:  # noqa: BLE001 — dashboard must render even with no DB
         logger.debug("Could not read signals: %s", exc)
         return []
+
+
+def _decode_match(match_id: str) -> str | None:
+    """Turn a ``"{fixture}:{outcome}:{home}_{away}"`` match_id into a readable bet thesis.
+
+    Returns e.g. "Senegal to beat Norway" (A), "France to beat Iraq" (H), or
+    "Draw, France-Iraq" (D); None if the match_id isn't in the expected shape.
+    """
+    parts = match_id.split(":")
+    if len(parts) < 3:
+        return None
+    outcome, teams = parts[1], parts[2].split("_", 1)
+    if len(teams) != 2:
+        return None
+    home, away = teams
+    if outcome == "H":
+        return f"{home} to beat {away}"
+    if outcome == "A":
+        return f"{away} to beat {home}"
+    if outcome == "D":
+        return f"Draw, {home}-{away}"
+    return None
+
+
+def explain_signal(sig: dict[str, Any]) -> str:
+    """Plain-English thesis for a bet, derived entirely from the stored signal row.
+
+    Example: "Senegal to beat Norway: model 38% vs market 30% (+8.1% edge), half-Kelly".
+    Falls back to a team-less phrasing when the match_id can't be decoded.
+    """
+    model = float(sig.get("model_prob") or 0.0)
+    implied = float(sig.get("market_implied") or 0.0)
+    edge = float(sig.get("edge") or 0.0)
+    thesis = f"model {model:.0%} vs market {implied:.0%} ({edge:+.1%} edge), half-Kelly"
+    matchup = _decode_match(str(sig.get("match_id", "")))
+    return f"{matchup}: {thesis}" if matchup else thesis
 
 
 def render(
@@ -89,15 +125,14 @@ def render(
     console.print(positions)
 
     signal_table = Table(title="RECENT SIGNALS")
-    for column in ("Market", "Model", "Implied", "Edge", "Bet $"):
-        signal_table.add_column(column)
+    signal_table.add_column("Market")
+    signal_table.add_column("Bet $", justify="right")
+    signal_table.add_column("Why")
     for sig in signals:
         signal_table.add_row(
             str(sig.get("market_ticker", "")),
-            f"{sig.get('model_prob', 0):.2f}",
-            f"{sig.get('market_implied', 0):.2f}",
-            f"{sig.get('edge', 0):+.2%}",
             f"{sig.get('bet_size_cents', 0) / 100:,.2f}",
+            explain_signal(sig),
         )
     console.print(signal_table)
 

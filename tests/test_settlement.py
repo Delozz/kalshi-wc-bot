@@ -68,7 +68,8 @@ def test_settle_fixture_winning_outcome(conn) -> None:
     ).fetchone()
     assert row["status"] == "settled"
     assert row["pnl_cents"] == 500
-    assert db.latest_bankroll(conn) == 20500
+    # Settlement records per-order P&L only; bankroll is left to the Kalshi re-sync.
+    assert db.latest_bankroll(conn) == 20000
 
 
 def test_settle_fixture_losing_outcome(conn) -> None:
@@ -78,7 +79,9 @@ def test_settle_fixture_losing_outcome(conn) -> None:
 
     pnl = settlement.settle_fixture(conn, 999, "H")  # home won -> away bet loses
     assert pnl == -500
-    assert db.latest_bankroll(conn) == 19500
+    row = conn.execute("SELECT pnl_cents FROM orders WHERE id = 'ord1'").fetchone()
+    assert row["pnl_cents"] == -500
+    assert db.latest_bankroll(conn) == 20000  # settlement does not touch the ledger
 
 
 def test_settle_fixture_draw_outcome_wins(conn) -> None:
@@ -88,7 +91,21 @@ def test_settle_fixture_draw_outcome_wins(conn) -> None:
 
     pnl = settlement.settle_fixture(conn, 999, "D")  # draw -> draw bet wins
     assert pnl == 500
-    assert db.latest_bankroll(conn) == 20500
+    assert db.latest_bankroll(conn) == 20000  # settlement does not touch the ledger
+
+
+def test_real_peak_ignores_fallback_rows(conn) -> None:
+    # Fallback syncs (placeholder bankroll when Kalshi balance can't be read) must not
+    # count toward the stop-loss high-water mark.
+    db.record_bankroll(conn, 20000, "sync_fallback")  # fake default — must be ignored
+    db.record_bankroll(conn, 5410, "sync")  # real high-water
+    db.record_bankroll(conn, 4691, "sync")  # real, after a loss
+    assert db.real_peak_bankroll(conn) == 5410
+
+
+def test_real_peak_none_without_real_sync(conn) -> None:
+    db.record_bankroll(conn, 10000, "sync_fallback")
+    assert db.real_peak_bankroll(conn) is None
 
 
 def test_settle_fixture_skips_unfilled(conn) -> None:
