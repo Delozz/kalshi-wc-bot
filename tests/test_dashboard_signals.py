@@ -51,3 +51,33 @@ def test_recent_signals_empty_db_returns_empty(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(db, "connect", lambda db_path=None: original(path))
 
     assert app._recent_signals() == []
+
+
+def _sig(match_id: str) -> dict:
+    return {
+        "match_id": match_id,
+        "model_prob": 0.381,
+        "market_implied": 0.30,
+        "edge": 0.081,
+    }
+
+
+def test_explain_signal_away_win() -> None:
+    text = app.explain_signal(_sig("1489401:A:Norway_Senegal"))
+    assert (
+        text
+        == "Senegal to beat Norway: model 38% vs market 30% (+8.1% edge), half-Kelly"
+    )
+
+
+def test_explain_signal_home_and_draw() -> None:
+    assert app.explain_signal(_sig("1:H:France_Iraq")).startswith(
+        "France to beat Iraq:"
+    )
+    assert app.explain_signal(_sig("1:D:France_Iraq")).startswith("Draw, France-Iraq:")
+
+
+def test_explain_signal_falls_back_without_teams() -> None:
+    # Unparseable match_id still yields the model-vs-market thesis (never crashes).
+    text = app.explain_signal(_sig("garbage"))
+    assert text == "model 38% vs market 30% (+8.1% edge), half-Kelly"
