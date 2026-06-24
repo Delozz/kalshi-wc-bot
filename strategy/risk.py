@@ -19,6 +19,15 @@ MAX_OPEN_POSITIONS: int = 3
 MIN_OPEN_INTEREST: float = 5000.0  # dollars
 MAX_PRICE_MOVE: float = 0.03  # cancel a signal if the price drifts more than 3 cents
 
+# Signal-quality guards. These reject draw/underdog legs that are really model
+# mis-calibration against a strong favorite (the France-vs-Iraq "bet the upset/draw"
+# problem), where the sharp Kalshi line is better-informed than our ELO model. They run
+# in signal_gen's candidate phase, before edge/sizing, so a doomed leg never claims a
+# ranking slot.
+MIN_MARKET_PRICE: float = 0.06  # below 6c the edge is longshot noise, not signal
+MAX_MODEL_MARKET_RATIO: float = 2.5  # model_prob may not exceed 2.5x the market price
+POWERHOUSE_ELO_GAP: float = 200.0  # ELO gap above which draw/upset legs are untrusted
+
 
 def stop_loss_triggered(
     bankroll: float, peak_bankroll: float, *, threshold: float | None = None
@@ -61,6 +70,45 @@ def price_stable(
     return abs(current_price - signal_price) <= max_move
 
 
+def price_floor_ok(market_price: float, *, min_price: float = MIN_MARKET_PRICE) -> bool:
+    """True if the market price clears the longshot floor (below it, edge is noise)."""
+    return market_price >= min_price
+
+
+def mismatch_ok(
+    model_prob: float,
+    market_price: float,
+    *,
+    max_ratio: float = MAX_MODEL_MARKET_RATIO,
+) -> bool:
+    """True unless the model probability dwarfs the market price (calibration outlier).
+
+    A model that prices an outcome at more than ``max_ratio`` times the sharp Kalshi line
+    is far likelier mis-calibrated than to have found genuine edge — so we defer to the
+    market. ``market_price <= 0`` is never tradeable.
+    """
+    if market_price <= 0.0:
+        return False
+    return (model_prob / market_price) <= max_ratio
+
+
+def favorite_not_overwhelming(
+    bet_on_favorite: bool,
+    favorite_elo_gap: float,
+    *,
+    max_gap: float = POWERHOUSE_ELO_GAP,
+) -> bool:
+    """True unless this is a draw/underdog leg against an overwhelming ELO favorite.
+
+    When one side outrates the other by ``max_gap`` ELO or more, the model's draw and
+    upset probabilities are untrustworthy (it under-rates true mismatches the market
+    prices sharply). The favorite's own win leg is always allowed through.
+    """
+    if bet_on_favorite:
+        return True
+    return favorite_elo_gap < max_gap
+
+
 @dataclass(frozen=True)
 class RiskDecision:
     approved: bool
@@ -85,4 +133,27 @@ def check_all(
         return RiskDecision(False, "insufficient_liquidity")
     if not exposure_ok(open_exposure, new_bet, bankroll):
         return RiskDecision(False, "exposure_cap")
+    return RiskDecision(True, "ok")
+
+
+def outcome_admissible(
+    *,
+    bet_on_favorite: bool,
+    model_prob: float,
+    market_price: float,
+    favorite_elo_gap: float,
+) -> RiskDecision:
+    """Pre-edge signal-quality gate run per outcome before edge/sizing.
+
+    Rejects legs the market is better-informed on: longshots below the price floor,
+    calibration outliers where the model dwarfs the line, and draw/upset legs against an
+    overwhelming favorite. Applied in ``signal_gen`` so a doomed leg never claims a
+    ranking slot, and so we stop betting upsets like Iraq-over-France.
+    """
+    if not price_floor_ok(market_price):
+        return RiskDecision(False, "below_price_floor")
+    if not mismatch_ok(model_prob, market_price):
+        return RiskDecision(False, "model_market_mismatch")
+    if not favorite_not_overwhelming(bet_on_favorite, favorite_elo_gap):
+        return RiskDecision(False, "powerhouse_favorite")
     return RiskDecision(True, "ok")
