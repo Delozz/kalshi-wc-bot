@@ -185,6 +185,14 @@ def generate_signals(
         )
         probs = predict_mod.predict_outcome(bundle, features)
 
+        # Pre-edge signal-quality gate inputs: the ELO favorite and the size of its edge.
+        # Draw/underdog legs against an overwhelming favorite are where our model is least
+        # trustworthy and the Kalshi line sharpest (the Iraq-over-France problem).
+        home_elo = features["home_elo_pre"]
+        away_elo = features["away_elo_pre"]
+        favorite = "H" if home_elo >= away_elo else "A"
+        elo_gap = abs(home_elo - away_elo)
+
         # Home-minus-away starting-XI strength (0.0 when lineups aren't announced).
         raw_lineup_delta = 0.0
         if lineups_by_fixture:
@@ -195,6 +203,25 @@ def generate_signals(
         for outcome, (ticker, yes_price) in outcome_markets.items():
             model_prob = probs.get(outcome)
             if model_prob is None:
+                continue
+            # Drop legs the market is better-informed on (longshot floor, model/market
+            # mismatch, draw/upset vs an overwhelming favorite) before edge/sizing.
+            admit = risk.outcome_admissible(
+                bet_on_favorite=(outcome == favorite),
+                model_prob=model_prob,
+                market_price=yes_price,
+                favorite_elo_gap=elo_gap,
+            )
+            if not admit.approved:
+                logger.info(
+                    "Filtered %s %s leg: %s (model=%.3f, price=%.2f, elo_gap=%.0f)",
+                    ticker,
+                    outcome,
+                    admit.reason,
+                    model_prob,
+                    yes_price,
+                    elo_gap,
+                )
                 continue
             # Sign the delta for this leg: +home, -away, 0 for the (ambiguous) draw.
             if outcome == "H":

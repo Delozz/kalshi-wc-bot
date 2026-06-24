@@ -56,3 +56,49 @@ def test_check_all_approves_clean_trade() -> None:
     )
     assert decision.approved is True
     assert decision.reason == "ok"
+
+
+def test_price_floor() -> None:
+    assert risk.price_floor_ok(0.06, min_price=0.06) is True
+    assert risk.price_floor_ok(0.05, min_price=0.06) is False
+
+
+def test_mismatch_ratio() -> None:
+    # model_prob / price: 0.20/0.10 = 2.0 ok; 0.30/0.10 = 3.0 too high.
+    assert risk.mismatch_ok(0.20, 0.10, max_ratio=2.5) is True
+    assert risk.mismatch_ok(0.30, 0.10, max_ratio=2.5) is False
+    assert risk.mismatch_ok(0.20, 0.0) is False  # zero price is never tradeable
+
+
+def test_favorite_not_overwhelming() -> None:
+    # The favorite's own leg always passes, however large the gap.
+    assert risk.favorite_not_overwhelming(True, 500.0, max_gap=200.0) is True
+    # A draw/upset leg is blocked once the gap reaches the threshold, allowed below it.
+    assert risk.favorite_not_overwhelming(False, 250.0, max_gap=200.0) is False
+    assert risk.favorite_not_overwhelming(False, 150.0, max_gap=200.0) is True
+
+
+def test_outcome_admissible_reasons() -> None:
+    # Clean underdog leg in a close matchup: passes all three guards.
+    ok = risk.outcome_admissible(
+        bet_on_favorite=False, model_prob=0.20, market_price=0.12, favorite_elo_gap=50.0
+    )
+    assert ok.approved is True and ok.reason == "ok"
+    # Below the 6c price floor (the Iraq-win-at-3c longshot).
+    floor = risk.outcome_admissible(
+        bet_on_favorite=False, model_prob=0.08, market_price=0.03, favorite_elo_gap=50.0
+    )
+    assert floor.approved is False and floor.reason == "below_price_floor"
+    # Model dwarfs the line (>2.5x) even above the floor.
+    mismatch = risk.outcome_admissible(
+        bet_on_favorite=False, model_prob=0.30, market_price=0.10, favorite_elo_gap=50.0
+    )
+    assert mismatch.approved is False and mismatch.reason == "model_market_mismatch"
+    # Draw/upset vs an overwhelming favorite (the France-vs-Iraq tie at 8c).
+    power = risk.outcome_admissible(
+        bet_on_favorite=False,
+        model_prob=0.17,
+        market_price=0.08,
+        favorite_elo_gap=303.0,
+    )
+    assert power.approved is False and power.reason == "powerhouse_favorite"

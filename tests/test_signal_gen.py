@@ -89,7 +89,9 @@ def test_generates_a_signal_per_outcome_with_edge(monkeypatch) -> None:
         history=history,
         ratings=_ratings(history),
         bundle={},
-        markets=_markets(5, 5, 5),  # cheap on every outcome -> edge on all three
+        # Cheap on every outcome -> edge on all three, but kept above the 6c floor and
+        # within the 2.5x model/market band so the signal-quality guards are no-ops here.
+        markets=_markets(30, 15, 10),
         bankroll_cents=20000,
     )
     assert len(signals) == 3
@@ -145,13 +147,66 @@ def test_scarce_slot_goes_to_highest_edge_not_first_processed(monkeypatch) -> No
         history=history,
         ratings=_ratings(history),
         bundle={},
-        # H: 0.60 vs 0.50 -> +0.10; D: 0.30 vs 0.40 -> -0.10 (skip); A: 0.20 vs 0.05 -> +0.15
-        markets=_markets(50, 40, 5),
+        # H: 0.60 vs 0.50 -> +0.10; D: 0.30 vs 0.40 -> -0.10 (skip); A: 0.20 vs 0.09 -> +0.11.
+        # Away leg stays above the 6c floor (9c) so it remains the highest-edge candidate.
+        markets=_markets(50, 40, 9),
         bankroll_cents=20000,
         n_open=2,
     )
     assert len(signals) == 1
     assert signals[0]["market_ticker"] == "KXWC26-BRA-A"
+
+
+def test_powerhouse_blocks_draw_and_upset_legs(monkeypatch) -> None:
+    # France (2000 ELO) vs Iraq (1600 ELO): a 400-point gap. Even though the model gives
+    # the draw and the Iraq upset enough probability to clear the edge threshold at these
+    # prices, both legs must be filtered as powerhouse mismatches — only the favorite
+    # (France) leg may survive. This is the Iraq-over-France bet we never want again.
+    monkeypatch.setattr(
+        signal_gen.predict_mod,
+        "predict_outcome",
+        lambda _b, _f: {"H": 0.65, "D": 0.20, "A": 0.15},
+    )
+    fixture = Fixture(
+        fixture_id=1,
+        kickoff_utc="2026-06-22T18:00:00+00:00",
+        status="NS",
+        home_team="France",
+        away_team="Iraq",
+        round="Group A",
+    )
+    markets = [
+        {
+            "ticker": "KXWC26-FRA-H",
+            "title": "France vs Iraq",
+            "yes_sub_title": "France",
+            "yes_ask_dollars": "0.5000",
+            "open_interest_fp": "10000.00",
+        },
+        {
+            "ticker": "KXWC26-FRA-D",
+            "title": "France vs Iraq",
+            "yes_sub_title": "Draw",
+            "yes_ask_dollars": "0.0800",
+            "open_interest_fp": "10000.00",
+        },
+        {
+            "ticker": "KXWC26-FRA-A",
+            "title": "France vs Iraq",
+            "yes_sub_title": "Iraq",
+            "yes_ask_dollars": "0.0800",
+            "open_interest_fp": "10000.00",
+        },
+    ]
+    signals = signal_gen.generate_signals(
+        fixtures=[fixture],
+        history=_history(),
+        ratings={"France": 2000.0, "Iraq": 1600.0},
+        bundle={},
+        markets=markets,
+        bankroll_cents=20000,
+    )
+    assert {s["match_id"].split(":")[1] for s in signals} == {"H"}
 
 
 def test_risk_blocks_on_stop_loss(monkeypatch) -> None:
