@@ -68,9 +68,16 @@ def load_settings() -> Settings:
     # logistic/XGBoost bundle (instant rollback via MODEL_ENGINE=classifier).
     engine_raw = _get_str("MODEL_ENGINE", "dc")
     model_engine: ModelEngine = "classifier" if engine_raw == "classifier" else "dc"
+    # Prefer env-specific credentials; fall back to the generic pair for existing .env files.
+    _demo_key = _get_str("KALSHI_DEMO_API_KEY", "") or _get_str("KALSHI_API_KEY", "")
+    _demo_secret = _get_str("KALSHI_DEMO_API_SECRET", "") or _get_str("KALSHI_API_SECRET", "")
+    _prod_key = _get_str("KALSHI_PROD_API_KEY", "") or _get_str("KALSHI_API_KEY", "")
+    _prod_secret = _get_str("KALSHI_PROD_API_SECRET", "") or _get_str("KALSHI_API_SECRET", "")
+    kalshi_api_key = _demo_key if kalshi_env == "demo" else _prod_key
+    kalshi_api_secret = _demo_secret if kalshi_env == "demo" else _prod_secret
     return Settings(
-        kalshi_api_key=_get_str("KALSHI_API_KEY", ""),
-        kalshi_api_secret=_get_str("KALSHI_API_SECRET", ""),
+        kalshi_api_key=kalshi_api_key,
+        kalshi_api_secret=kalshi_api_secret,
         api_football_key=_get_str("API_FOOTBALL_KEY", ""),
         the_odds_api_key=_get_str("THE_ODDS_API_KEY", ""),
         kalshi_env=kalshi_env,
