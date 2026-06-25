@@ -19,6 +19,7 @@ PROCESSED_DIR: Path = DATA_DIR / "processed"
 ARTIFACTS_DIR: Path = PROJECT_ROOT / "model" / "artifacts"
 
 KalshiEnv = Literal["demo", "prod"]
+ModelEngine = Literal["classifier", "dc"]
 
 
 def _get_str(key: str, default: str) -> str:
@@ -45,6 +46,7 @@ class Settings:
     api_football_key: str
     the_odds_api_key: str
     kalshi_env: KalshiEnv
+    model_engine: ModelEngine
     min_edge_threshold: float
     max_bet_fraction: float
     max_portfolio_exposure: float
@@ -61,12 +63,18 @@ def load_settings() -> Settings:
     """Build a Settings snapshot from the current environment."""
     env_raw = _get_str("KALSHI_ENV", "demo")
     kalshi_env: KalshiEnv = "prod" if env_raw == "prod" else "demo"
+    # Live probability engine. "dc" = Dixon-Coles goals model with the ELO strength prior
+    # (validated out-of-sample, the production default); "classifier" = the original
+    # logistic/XGBoost bundle (instant rollback via MODEL_ENGINE=classifier).
+    engine_raw = _get_str("MODEL_ENGINE", "dc")
+    model_engine: ModelEngine = "classifier" if engine_raw == "classifier" else "dc"
     return Settings(
         kalshi_api_key=_get_str("KALSHI_API_KEY", ""),
         kalshi_api_secret=_get_str("KALSHI_API_SECRET", ""),
         api_football_key=_get_str("API_FOOTBALL_KEY", ""),
         the_odds_api_key=_get_str("THE_ODDS_API_KEY", ""),
         kalshi_env=kalshi_env,
+        model_engine=model_engine,
         min_edge_threshold=_get_float("MIN_EDGE_THRESHOLD", 0.04),
         max_bet_fraction=_get_float("MAX_BET_FRACTION", 0.05),
         max_portfolio_exposure=_get_float("MAX_PORTFOLIO_EXPOSURE", 0.20),

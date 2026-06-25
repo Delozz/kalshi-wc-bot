@@ -157,6 +157,61 @@ def test_scarce_slot_goes_to_highest_edge_not_first_processed(monkeypatch) -> No
     assert signals[0]["market_ticker"] == "KXWC26-BRA-A"
 
 
+def test_injected_predictor_overrides_classifier() -> None:
+    # The engine seam: a custom predictor supplies the base probs instead of the bundle,
+    # and the rest of the pipeline (edge, sizing) runs on them unchanged. This is the path
+    # run_live uses to swap in the Dixon-Coles engine.
+    history = _history()
+    used = {}
+
+    def predictor(_fixture, _features):
+        used["called"] = True
+        return {"H": 0.6, "D": 0.3, "A": 0.2}
+
+    signals = signal_gen.generate_signals(
+        fixtures=[_fixture()],
+        history=history,
+        ratings=_ratings(history),
+        predictor=predictor,
+        markets=_markets(30, 15, 10),
+        bankroll_cents=20000,
+    )
+    assert used.get("called") is True
+    assert {_leg(s) for s in signals} == {"H", "D", "A"}
+
+
+def test_dc_predictor_drives_signals() -> None:
+    # A fitted Dixon-Coles model plugged in as the predictor produces signals end to end.
+    import pandas as pd
+
+    from model import dixon_coles
+
+    scorelines = pd.DataFrame(
+        {
+            "date": pd.to_datetime(
+                ["2024-01-01", "2024-02-01", "2024-03-01", "2024-04-01"]
+            ),
+            "home_team": ["Brazil", "Serbia", "Brazil", "Serbia"],
+            "away_team": ["Serbia", "Brazil", "Serbia", "Brazil"],
+            "fthg": [3, 0, 2, 1],
+            "ftag": [0, 2, 1, 3],
+            "neutral": [True, True, True, True],
+        }
+    )
+    model = dixon_coles.fit(scorelines, min_matches=2)
+    history = _history()
+    signals = signal_gen.generate_signals(
+        fixtures=[_fixture()],
+        history=history,
+        ratings=_ratings(history),
+        predictor=signal_gen._dc_predictor(model),
+        markets=_markets(30, 25, 25),
+        bankroll_cents=20000,
+    )
+    # Brazil is the stronger side in the fitted model, so the home leg must be among signals.
+    assert "H" in {_leg(s) for s in signals}
+
+
 def test_powerhouse_blocks_draw_and_upset_legs(monkeypatch) -> None:
     # France (2000 ELO) vs Iraq (1600 ELO): a 400-point gap. Even though the model gives
     # the draw and the Iraq upset enough probability to clear the edge threshold at these
