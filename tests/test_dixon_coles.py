@@ -84,6 +84,45 @@ def test_home_advantage_helps_on_non_neutral() -> None:
     assert home["H"] > home["A"]
 
 
+def test_strength_prior_lifts_a_data_sparse_strong_team() -> None:
+    # A newcomer with only a couple of (mediocre) results but a high strength signal should
+    # be rated stronger WITH the prior than without it — that is the whole point of the
+    # prior: let external strength carry teams the raw scorelines under-state.
+    base = _synthetic()
+    extra = pd.DataFrame(
+        {
+            "date": [
+                pd.Timestamp("2016-06-01", tz="UTC") + pd.Timedelta(days=int(d))
+                for d in range(4)
+            ],
+            "home_team": ["Newcomer", "Mid", "Newcomer", "Weak"],
+            "away_team": ["Mid", "Newcomer", "Weak", "Newcomer"],
+            "fthg": [1, 1, 1, 1],
+            "ftag": [1, 1, 1, 1],
+            "neutral": [True, True, True, True],
+        }
+    )
+    matches = pd.concat([base, extra], ignore_index=True)
+    strength = {"Strong": 1900.0, "Mid": 1600.0, "Weak": 1400.0, "Newcomer": 1950.0}
+
+    plain = dc.fit(matches, min_matches=3)
+    primed = dc.fit(matches, min_matches=3, strength=strength, prior_scale=0.4)
+
+    # With the prior, the high-strength newcomer's net rating (attack - defense) is lifted.
+    plain_net = plain.attack["Newcomer"] - plain.defense["Newcomer"]
+    primed_net = primed.attack["Newcomer"] - primed.defense["Newcomer"]
+    assert primed_net > plain_net
+
+
+def test_zero_prior_scale_is_unchanged() -> None:
+    # prior_scale=0 (or no strength) must reproduce the plain fit exactly.
+    matches = _synthetic()
+    a = dc.fit(matches, min_matches=3)
+    b = dc.fit(matches, min_matches=3, strength={"Strong": 99.0}, prior_scale=0.0)
+    assert a.attack == b.attack
+    assert a.defense == b.defense
+
+
 def test_rho_shifts_draw_mass() -> None:
     # The DC correction with positive rho changes the draw balance vs rho = 0.
     common = dict(

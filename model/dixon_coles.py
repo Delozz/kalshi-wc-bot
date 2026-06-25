@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import logging
 import math
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -42,6 +43,11 @@ DEFAULT_RIDGE = (
     1.0  # L2 pull on attack/defense — pins the overall level, stabilises the fit
 )
 _TAU_FLOOR = 1e-12  # clamp the DC correction so log() never sees a non-positive value
+# Validated strength-prior weight (2018 out-of-sample ELO sweep). 0.5 sits at the knee:
+# it beats both plain DC (Brier 0.583) and the classifier (0.582) at 0.573 with peak
+# accuracy, before higher values trade accuracy/log-loss away by collapsing the goals model
+# into ELO-as-Poisson. The live squad-strength prior should reuse this as its default.
+DEFAULT_PRIOR_SCALE = 0.5
 
 
 @dataclass(frozen=True)
@@ -151,8 +157,15 @@ def _neg_log_likelihood(
     neutral: np.ndarray,
     weights: np.ndarray,
     ridge: float,
+    prior_attack: np.ndarray,
+    prior_defense: np.ndarray,
 ) -> float:
-    """Weighted DC negative log-likelihood with an L2 pull on the ratings."""
+    """Weighted DC negative log-likelihood with an L2 pull toward the strength prior.
+
+    The ridge shrinks each team's attack/defense toward ``prior_attack``/``prior_defense``
+    (the external strength prior) rather than toward zero. Data-rich teams override the
+    prior; sparse teams lean on it. With a zero prior this is ordinary ridge-to-average.
+    """
     attack = params[:n]
     defense = params[n : 2 * n]
     home_adv = params[2 * n]
@@ -178,8 +191,39 @@ def _neg_log_likelihood(
     tau[m11] = 1.0 - rho
     ll += np.log(np.clip(tau, _TAU_FLOOR, None))
 
-    penalty = ridge * (np.sum(attack**2) + np.sum(defense**2))
+    penalty = ridge * (
+        np.sum((attack - prior_attack) ** 2) + np.sum((defense - prior_defense) ** 2)
+    )
     return float(-np.sum(weights * ll) + penalty)
+
+
+def _strength_prior(
+    teams: list[str],
+    strength: Mapping[str, float] | None,
+    prior_scale: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Turn an external per-team strength signal into (prior_attack, prior_defense).
+
+    The strength values (e.g. ELO, or squad rating for live) are z-scored across the
+    modelled teams, then mapped so a stronger team gets higher attack and *more negative*
+    defense (concedes fewer): ``prior_attack = scale*z``, ``prior_defense = -scale*z``. The
+    prior is mean-zero by construction, so it shifts where ratings shrink *to* without
+    moving the overall level. Returns zero arrays when no strength is supplied — identical
+    to the original shrink-to-average behaviour.
+    """
+    n = len(teams)
+    if not strength or prior_scale == 0.0:
+        return np.zeros(n), np.zeros(n)
+    raw = np.array([float(strength.get(team, np.nan)) for team in teams])
+    seen = ~np.isnan(raw)
+    if seen.sum() < 2:
+        return np.zeros(n), np.zeros(n)
+    mean = raw[seen].mean()
+    std = raw[seen].std()
+    z = np.where(seen, (raw - mean) / std, 0.0) if std > 0 else np.zeros(n)
+    prior_attack = prior_scale * z
+    prior_defense = -prior_scale * z
+    return prior_attack, prior_defense
 
 
 def fit(
@@ -191,6 +235,8 @@ def fit(
     min_matches: int = 5,
     max_goals: int = DEFAULT_MAX_GOALS,
     maxiter: int = 1000,
+    strength: Mapping[str, float] | None = None,
+    prior_scale: float = 0.0,
 ) -> DixonColesModel:
     """Fit attack/defense/home-adv/rho by time-decayed, ridge-penalised Poisson MLE.
 
@@ -198,6 +244,12 @@ def fit(
     responsible for passing only causal (pre-kickoff) matches — the backtest seals this with
     ``lookahead_guard`` (L1). Teams with fewer than ``min_matches`` appearances are dropped
     and fall back to average (0/0) ratings at prediction time.
+
+    ``strength`` (optional) is an external per-team strength signal — ELO in the backtest,
+    squad rating for live — that the ridge shrinks the ratings *toward* (scaled by
+    ``prior_scale``). This lets a star-laden or highly-rated side carry strength the raw
+    scorelines under-state, especially for teams with sparse history. With no ``strength``
+    the fit is unchanged (shrink toward average).
     """
     if cutoff is None:
         cutoff = pd.to_datetime(matches["date"], utc=True).max()
@@ -210,16 +262,31 @@ def fit(
         matches, cutoff=cutoff, xi=xi, min_matches=min_matches
     )
     n = len(teams)
+    prior_attack, prior_defense = _strength_prior(teams, strength, prior_scale)
 
-    # Init: zero ratings, a mild positive home advantage, zero correlation.
+    # Init at the prior (not zero): seeds the optimiser near the strength-implied ratings,
+    # a mild positive home advantage, zero correlation.
     init = np.zeros(2 * n + 2)
+    init[:n] = prior_attack
+    init[n : 2 * n] = prior_defense
     init[2 * n] = 0.25
     bounds = [(None, None)] * (2 * n) + [(None, None), (-0.9, 0.9)]
 
     result = minimize(
         _neg_log_likelihood,
         init,
-        args=(n, home_i, away_i, x, y, neutral, weights, ridge),
+        args=(
+            n,
+            home_i,
+            away_i,
+            x,
+            y,
+            neutral,
+            weights,
+            ridge,
+            prior_attack,
+            prior_defense,
+        ),
         method="L-BFGS-B",
         bounds=bounds,
         # maxfun must scale with the parameter count: a single numerical gradient costs

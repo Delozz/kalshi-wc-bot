@@ -35,6 +35,7 @@ import pandas as pd
 from backtest import lookahead_guard
 from config import configure_logging
 from ingestion import international_results
+from features import elo
 from model import baseline as baseline_mod
 from model import calibration as calib_mod
 from model import dixon_coles
@@ -117,7 +118,7 @@ def evaluate_split(year: int, train: pd.DataFrame, val: pd.DataFrame) -> Tournam
 
 
 def evaluate_goals_model(
-    year: int, train: pd.DataFrame, val: pd.DataFrame
+    year: int, train: pd.DataFrame, val: pd.DataFrame, *, prior_scale: float = 0.0
 ) -> tuple[eval_mod.EvalResult, list[tuple[float, float, int]]]:
     """Fit Dixon-Coles on ``train`` scorelines and score H/D/A on ``val``, causally.
 
@@ -126,6 +127,11 @@ def evaluate_goals_model(
     it. Probabilities are read natively from each fixture's score matrix and scored with the
     shared Brier / log-loss / reliability metrics, so the result is directly comparable to
     the classifier's.
+
+    ``prior_scale`` > 0 turns on the strength prior: the model's attack/defense are shrunk
+    toward ELO computed causally on ``train`` (the same ELO the live pipeline uses), so
+    sparse-history teams inherit ELO's broader signal. This is the backtestable proxy for
+    the live squad-strength prior, which plugs into the identical ``strength`` interface.
     """
     if val.empty:
         raise SystemExit(f"No {year} World Cup validation matches found; aborting.")
@@ -133,7 +139,16 @@ def evaluate_goals_model(
     cutoff = pd.to_datetime(val["date"]).min().to_pydatetime()
     lookahead_guard.filter_data(train, cutoff)
 
-    model = dixon_coles.fit(train, cutoff=pd.Timestamp(cutoff))
+    # ELO over the (causal) training matches is the strength prior; 0 scale = plain DC.
+    strength = (
+        elo.final_ratings(train, use_tournament_k=True) if prior_scale > 0 else None
+    )
+    model = dixon_coles.fit(
+        train,
+        cutoff=pd.Timestamp(cutoff),
+        strength=strength,
+        prior_scale=prior_scale,
+    )
 
     # Column order must match LABEL_MAP (H=0, D=1, A=2) so evaluate() lines probs up
     # with the integer labels.
@@ -208,6 +223,12 @@ def main() -> None:
         default="classifier",
         help="Which engine to evaluate: classifier (baseline+XGBoost) or dc (Dixon-Coles).",
     )
+    parser.add_argument(
+        "--dc-prior-scale",
+        type=float,
+        default=0.0,
+        help="Strength of the ELO prior for --model dc (0 = plain DC; try 0.1-0.4).",
+    )
     args = parser.parse_args()
     configure_logging()
 
@@ -227,10 +248,14 @@ def main() -> None:
     train = train[train["date"] >= pd.Timestamp(TRAIN_START)]
 
     if args.model == "dc":
-        result, reliability = evaluate_goals_model(args.year, train, val)
+        result, reliability = evaluate_goals_model(
+            args.year, train, val, prior_scale=args.dc_prior_scale
+        )
         logger.info(
-            "=== %d World Cup out-of-sample (Dixon-Coles, %d train / %d eval) ===",
+            "=== %d World Cup out-of-sample (Dixon-Coles, prior_scale=%.2f, "
+            "%d train / %d eval) ===",
             args.year,
+            args.dc_prior_scale,
             len(train),
             result.n,
         )
