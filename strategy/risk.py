@@ -27,6 +27,10 @@ MAX_PRICE_MOVE: float = 0.03  # cancel a signal if the price drifts more than 3 
 MIN_MARKET_PRICE: float = 0.06  # below 6c the edge is longshot noise, not signal
 MAX_MODEL_MARKET_RATIO: float = 2.5  # model_prob may not exceed 2.5x the market price
 POWERHOUSE_ELO_GAP: float = 200.0  # ELO gap above which draw/upset legs are untrusted
+# Lower bar applied only when the squad-strength prior agrees on the same favorite: a
+# moderate ELO edge plus a stronger squad is enough to distrust draw/upset legs (catches
+# the Portugal-type favorite whose ELO gap sits just under the pure-ELO threshold).
+POWERHOUSE_ELO_GAP_WITH_SQUAD: float = 150.0
 
 
 def stop_loss_triggered(
@@ -142,13 +146,17 @@ def outcome_admissible(
     model_prob: float,
     market_price: float,
     favorite_elo_gap: float,
+    squad_confirms_favorite: bool = False,
 ) -> RiskDecision:
     """Pre-edge signal-quality gate run per outcome before edge/sizing.
 
     Rejects legs the market is better-informed on: longshots below the price floor,
-    calibration outliers where the model dwarfs the line, and draw/upset legs against an
-    overwhelming favorite. Applied in ``signal_gen`` so a doomed leg never claims a
-    ranking slot, and so we stop betting upsets like Iraq-over-France.
+    calibration outliers where the model dwarfs the line, and draw/upset legs against a
+    clear favorite. The favorite check has two tiers: an overwhelming pure-ELO gap, or a
+    merely-strong ELO gap that the squad-strength prior independently confirms
+    (``squad_confirms_favorite``) — the latter catches Portugal-type favorites whose ELO
+    edge alone sits just under the pure threshold. Applied in ``signal_gen`` so a doomed
+    leg never claims a ranking slot, and so we stop betting upsets like Iraq-over-France.
     """
     if not price_floor_ok(market_price):
         return RiskDecision(False, "below_price_floor")
@@ -156,4 +164,10 @@ def outcome_admissible(
         return RiskDecision(False, "model_market_mismatch")
     if not favorite_not_overwhelming(bet_on_favorite, favorite_elo_gap):
         return RiskDecision(False, "powerhouse_favorite")
+    if (
+        not bet_on_favorite
+        and squad_confirms_favorite
+        and favorite_elo_gap >= POWERHOUSE_ELO_GAP_WITH_SQUAD
+    ):
+        return RiskDecision(False, "powerhouse_favorite_squad")
     return RiskDecision(True, "ok")
