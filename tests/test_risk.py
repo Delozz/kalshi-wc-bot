@@ -33,8 +33,10 @@ def test_price_stable() -> None:
 
 
 def test_check_all_priority_stop_loss_first() -> None:
+    # Deep 90% drawdown so stop-loss trips regardless of the operator-configured
+    # threshold (this asserts stop-loss *priority* in check_all, not a specific level).
     decision = risk.check_all(
-        bankroll=700.0,
+        bankroll=100.0,
         peak_bankroll=1000.0,
         open_exposure=0.0,
         new_bet=10.0,
