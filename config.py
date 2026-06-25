@@ -52,6 +52,7 @@ class Settings:
     stop_loss_threshold: float
     initial_bankroll_cents: int
     lineup_weight: float
+    squad_weight: float
     db_path: Path
     log_level: str
 
@@ -75,6 +76,11 @@ def load_settings() -> Settings:
         # Max fractional swing applied to a model probability when a fully-rated lineup
         # is available (lineup_delta in [-1, 1]). 0 disables lineup adjustment entirely.
         lineup_weight=_get_float("LINEUP_WEIGHT", 0.10),
+        # Strength of the always-on squad-strength prior (squad_delta in [-1, 1] tilts the
+        # full H/D/A vector toward the stronger squad). 4.0 chosen from a weight-sweep
+        # replay against real bets — a meaningful but calibration-safe tilt given how
+        # compressed national-team ratings are. 0 disables the squad prior entirely.
+        squad_weight=_get_float("SQUAD_WEIGHT", 4.0),
         db_path=Path(_get_str("DB_PATH", "data/db.sqlite")),
         log_level=_get_str("LOG_LEVEL", "INFO"),
     )

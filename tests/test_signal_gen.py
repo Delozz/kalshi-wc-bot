@@ -209,6 +209,48 @@ def test_powerhouse_blocks_draw_and_upset_legs(monkeypatch) -> None:
     assert {s["match_id"].split(":")[1] for s in signals} == {"H"}
 
 
+def _leg(signal) -> str:
+    return signal["match_id"].split(":")[1]
+
+
+def test_squad_prior_suppresses_bets_against_stronger_squad(monkeypatch) -> None:
+    # Without a squad prior, all three legs clear the edge at these prices. Feeding a squad
+    # prior where the home side (Brazil) is much stronger than the away side (Serbia) must
+    # tilt probability onto the favourite: the draw and the upset legs lose enough mass to
+    # fall below the market and stop being bet, while the favourite leg survives. This is
+    # the Portugal/Norway fix — we no longer bet against a clearly stronger squad.
+    monkeypatch.setattr(signal_gen.predict_mod, "predict_outcome", _fixed_probs)
+    history = _history()
+    ratings = _ratings(history)
+    markets = _markets(40, 20, 15)
+
+    base = signal_gen.generate_signals(
+        fixtures=[_fixture()],
+        history=history,
+        ratings=ratings,
+        bundle={},
+        markets=markets,
+        bankroll_cents=20000,
+    )
+    assert {_leg(s) for s in base} == {"H", "D", "A"}
+
+    tilted = signal_gen.generate_signals(
+        fixtures=[_fixture()],
+        history=history,
+        ratings=ratings,
+        bundle={},
+        markets=markets,
+        bankroll_cents=20000,
+        squad_ratings_by_team={
+            "Brazil": {1: 8.0, 2: 8.0},
+            "Serbia": {1: 6.0, 2: 6.0},
+        },
+    )
+    legs = {_leg(s) for s in tilted}
+    assert "H" in legs
+    assert "D" not in legs and "A" not in legs
+
+
 def test_risk_blocks_on_stop_loss(monkeypatch) -> None:
     monkeypatch.setattr(signal_gen.predict_mod, "predict_outcome", _fixed_probs)
     history = _history()

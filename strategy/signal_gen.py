@@ -22,7 +22,7 @@ from typing import Any
 import pandas as pd
 
 from config import settings
-from features import elo, lineup
+from features import elo, lineup, squad
 from ingestion.api_football import Fixture
 from model import predict as predict_mod
 from model.dataset import WC_HOSTS, build_live_features
@@ -146,6 +146,7 @@ def generate_signals(
     lineups_by_fixture: (
         dict[int, tuple[dict[str, Any] | None, dict[str, Any] | None]] | None
     ) = None,
+    squad_ratings_by_team: dict[str, dict[int, float]] | None = None,
 ) -> list[Signal]:
     """Produce sized, risk-checked signals across all outcomes for the given fixtures.
 
@@ -153,7 +154,13 @@ def generate_signals(
     away_lineup)`` API-Football payloads. When present, the resulting home-minus-away
     strength delta nudges the model probability per outcome (positive favours home, so
     it is negated for the away leg and zeroed for the draw). Absent or unannounced
-    lineups leave a 0.0 delta — identical to the pre-lineup behaviour."""
+    lineups leave a 0.0 delta — identical to the pre-lineup behaviour.
+
+    ``squad_ratings_by_team`` (optional) maps a canonical team name to its squad's season
+    player ratings ``{player_id: rating}``. When present, an always-on squad-strength prior
+    tilts the full {H, D, A} vector toward the stronger squad *before* the edge check —
+    available at any horizon, so it shapes advance bets where the announced-lineup nudge is
+    still 0.0. Teams with no ratings contribute a 0.0 delta (zero-impact fallback)."""
     hosts_by_year = hosts_by_year or WC_HOSTS
     bankroll = bankroll_cents / 100.0
     peak = (
@@ -185,6 +192,19 @@ def generate_signals(
         )
         probs = predict_mod.predict_outcome(bundle, features)
 
+        # Always-on squad-strength prior: tilt the {H,D,A} vector toward the stronger
+        # squad. Squad ratings are available at any horizon (unlike announced lineups), so
+        # this shapes advance bets — the Portugal/Ronaldo, Norway/Haaland case where we bet
+        # days before kickoff and the lineup nudge would still be 0.0.
+        squad_delta = 0.0
+        if squad_ratings_by_team:
+            squad_delta = squad.squad_strength_delta(
+                squad_ratings_by_team.get(fixture.home_team),
+                squad_ratings_by_team.get(fixture.away_team),
+            )
+            if squad_delta:
+                probs = edge_mod.apply_squad_prior(probs, squad_delta)
+
         # Pre-edge signal-quality gate inputs: the ELO favorite and the size of its edge.
         # Draw/underdog legs against an overwhelming favorite are where our model is least
         # trustworthy and the Kalshi line sharpest (the Iraq-over-France problem).
@@ -192,6 +212,11 @@ def generate_signals(
         away_elo = features["away_elo_pre"]
         favorite = "H" if home_elo >= away_elo else "A"
         elo_gap = abs(home_elo - away_elo)
+        # The squad prior independently confirms the ELO favorite when its sign agrees,
+        # which lowers the ELO bar for suppressing draw/upset legs (the Portugal case).
+        squad_confirms_favorite = (squad_delta > 0 and favorite == "H") or (
+            squad_delta < 0 and favorite == "A"
+        )
 
         # Home-minus-away starting-XI strength (0.0 when lineups aren't announced).
         raw_lineup_delta = 0.0
@@ -211,6 +236,7 @@ def generate_signals(
                 model_prob=model_prob,
                 market_price=yes_price,
                 favorite_elo_gap=elo_gap,
+                squad_confirms_favorite=squad_confirms_favorite,
             )
             if not admit.approved:
                 logger.info(
@@ -370,6 +396,48 @@ async def _fetch_lineups(
     return out
 
 
+async def _fetch_squad_ratings(
+    raw_fixtures: list[dict[str, Any]], fixtures: list[Fixture]
+) -> dict[str, dict[int, float]]:
+    """Fetch cached squad season ratings for every upcoming team we have an API id for.
+
+    Unlike lineups, squad ratings exist at any horizon, so this runs for every upcoming
+    fixture (not just the pre-match window). Team ids are read from the raw API-Football
+    fixtures payload; the Kalshi-fallback path carries no ids, so this simply returns ``{}``
+    — a zero-impact prior. Each fetch is cached per team per day and wrapped so one bad team
+    never blocks the rest (L9)."""
+    from features.teams import canonical
+    from ingestion import api_football
+
+    name_to_id: dict[str, int] = {}
+    for fixture in raw_fixtures or []:
+        teams = fixture.get("teams") or {}
+        for side in ("home", "away"):
+            team = teams.get(side) or {}
+            tid, name = team.get("id"), team.get("name")
+            if tid is not None and name:
+                name_to_id[canonical(str(name))] = int(tid)
+
+    wanted = {f.home_team for f in fixtures} | {f.away_team for f in fixtures}
+    out: dict[str, dict[int, float]] = {}
+    for name in wanted:
+        team_id = name_to_id.get(name)
+        if team_id is None:
+            continue
+        try:
+            ratings = await api_football.fetch_squad_ratings(team_id)
+        except (
+            Exception
+        ) as exc:  # noqa: BLE001 — L9: a rating gap must not crash the run
+            logger.warning("Squad-rating fetch failed for %s: %s", name, exc)
+            continue
+        if ratings:
+            out[name] = ratings
+    if out:
+        logger.info("Fetched squad ratings for %d team(s)", len(out))
+    return out
+
+
 async def run_live(*, dry_run: bool = True) -> list[Signal]:
     """Fetch live inputs, generate signals, and route them (dry-run by default, L8)."""
     from execution import order_manager, portfolio
@@ -420,6 +488,9 @@ async def run_live(*, dry_run: bool = True) -> list[Signal]:
     lineups_by_fixture = (
         await _fetch_lineups(fixtures) if fixtures_have_real_ids else {}
     )
+    # Always-on squad-strength prior — runs at any horizon, so it shapes advance bets the
+    # lineup nudge can't reach. Empty (zero-impact) on the Kalshi-fallback path (no ids).
+    squad_ratings_by_team = await _fetch_squad_ratings(raw_fixtures, fixtures)
 
     signals = generate_signals(
         fixtures=fixtures,
@@ -432,6 +503,7 @@ async def run_live(*, dry_run: bool = True) -> list[Signal]:
         open_exposure_cents=state.exposure_cents,
         n_open=state.open_count,
         lineups_by_fixture=lineups_by_fixture,
+        squad_ratings_by_team=squad_ratings_by_team,
     )
     for signal in signals:
         result = await order_manager.place_order(signal, dry_run=dry_run)

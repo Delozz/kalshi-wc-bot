@@ -39,6 +39,43 @@ def apply_lineup_adjustment(model_prob: float, lineup_delta: float) -> float:
     return max(0.0, min(1.0, adjusted))
 
 
+def apply_squad_prior(
+    probs: dict[str, float],
+    squad_delta: float,
+    *,
+    weight: float | None = None,
+) -> dict[str, float]:
+    """Tilt the full {H, D, A} probability vector toward the stronger squad, renormalized.
+
+    ``squad_delta`` is the home-minus-away squad strength in ``[-1, 1]`` (positive favours
+    home). The favoured side's win probability is scaled up by ``weight * |delta|`` while
+    *both* the draw and the underdog are scaled down by the same factor, then the vector is
+    renormalized to sum to 1. Scaling-then-renormalizing keeps the result a valid, still
+    reasonably-calibrated distribution (no probability can go negative or exceed 1), unlike
+    the per-leg lineup nudge which leaves the draw untouched.
+
+    With ``squad_delta == 0`` (either squad unrated) this is the identity — the zero-impact
+    fallback. ``weight`` defaults to ``settings.squad_weight``.
+    """
+    w = settings.squad_weight if weight is None else weight
+    tilt = w * squad_delta
+    if tilt == 0.0 or not probs:
+        return dict(probs)
+
+    favorite = "H" if tilt > 0 else "A"
+    # Cap the shrink factor just below 1 so the de-emphasized legs stay strictly positive.
+    magnitude = min(abs(tilt), 0.95)
+
+    scaled = {
+        outcome: prob * (1.0 + magnitude if outcome == favorite else 1.0 - magnitude)
+        for outcome, prob in probs.items()
+    }
+    total = sum(scaled.values())
+    if total <= 0.0:
+        return dict(probs)
+    return {outcome: value / total for outcome, value in scaled.items()}
+
+
 def build_signal(
     *,
     match_id: str,

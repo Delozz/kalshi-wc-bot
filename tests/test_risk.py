@@ -102,3 +102,43 @@ def test_outcome_admissible_reasons() -> None:
         favorite_elo_gap=303.0,
     )
     assert power.approved is False and power.reason == "powerhouse_favorite"
+
+
+def test_outcome_admissible_combined_elo_squad_filter() -> None:
+    # ELO gap 182 is under the pure-ELO threshold (200), so on its own it passes...
+    elo_only = risk.outcome_admissible(
+        bet_on_favorite=False,
+        model_prob=0.25,
+        market_price=0.12,
+        favorite_elo_gap=182.0,
+    )
+    assert elo_only.approved is True
+    # ...but once the squad prior confirms the same favorite, the lower bar (150) blocks it
+    # (the Portugal-vs-Uzbekistan tie: ELO 182 + a stronger Portugal squad).
+    with_squad = risk.outcome_admissible(
+        bet_on_favorite=False,
+        model_prob=0.25,
+        market_price=0.12,
+        favorite_elo_gap=182.0,
+        squad_confirms_favorite=True,
+    )
+    assert with_squad.approved is False
+    assert with_squad.reason == "powerhouse_favorite_squad"
+    # Below the squad-confirmed bar (150), a confirming squad still doesn't suppress.
+    small_gap = risk.outcome_admissible(
+        bet_on_favorite=False,
+        model_prob=0.25,
+        market_price=0.12,
+        favorite_elo_gap=120.0,
+        squad_confirms_favorite=True,
+    )
+    assert small_gap.approved is True
+    # The favorite's own leg is never suppressed, even with a confirming squad.
+    fav_leg = risk.outcome_admissible(
+        bet_on_favorite=True,
+        model_prob=0.65,
+        market_price=0.50,
+        favorite_elo_gap=182.0,
+        squad_confirms_favorite=True,
+    )
+    assert fav_leg.approved is True
