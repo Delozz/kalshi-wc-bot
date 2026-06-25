@@ -37,9 +37,15 @@ from config import configure_logging
 from ingestion import international_results
 from model import baseline as baseline_mod
 from model import calibration as calib_mod
+from model import dixon_coles
 from model import evaluate as eval_mod
 from model import xgboost_model
-from model.dataset import FEATURE_COLUMNS, build_feature_table, split_train_val
+from model.dataset import (
+    FEATURE_COLUMNS,
+    LABEL_MAP,
+    build_feature_table,
+    split_train_val,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -110,6 +116,41 @@ def evaluate_split(year: int, train: pd.DataFrame, val: pd.DataFrame) -> Tournam
     )
 
 
+def evaluate_goals_model(
+    year: int, train: pd.DataFrame, val: pd.DataFrame
+) -> tuple[eval_mod.EvalResult, list[tuple[float, float, int]]]:
+    """Fit Dixon-Coles on ``train`` scorelines and score H/D/A on ``val``, causally.
+
+    Same causal contract as :func:`evaluate_split` — the training frame is routed through
+    ``lookahead_guard`` against the tournament's first kickoff (L1) before the model sees
+    it. Probabilities are read natively from each fixture's score matrix and scored with the
+    shared Brier / log-loss / reliability metrics, so the result is directly comparable to
+    the classifier's.
+    """
+    if val.empty:
+        raise SystemExit(f"No {year} World Cup validation matches found; aborting.")
+
+    cutoff = pd.to_datetime(val["date"]).min().to_pydatetime()
+    lookahead_guard.filter_data(train, cutoff)
+
+    model = dixon_coles.fit(train, cutoff=pd.Timestamp(cutoff))
+
+    # Column order must match LABEL_MAP (H=0, D=1, A=2) so evaluate() lines probs up
+    # with the integer labels.
+    order = [outcome for outcome, _ in sorted(LABEL_MAP.items(), key=lambda kv: kv[1])]
+    probs = np.empty((len(val), 3), dtype=float)
+    for i, row in enumerate(val.itertuples(index=False)):
+        hda = model.predict_hda(
+            row.home_team, row.away_team, neutral=bool(getattr(row, "neutral", True))
+        )
+        probs[i] = [hda[outcome] for outcome in order]
+
+    y_val = val["label"].to_numpy(dtype=int)
+    result = eval_mod.evaluate(y_val, probs)
+    reliability = eval_mod.reliability_curve(y_val, probs)
+    return result, reliability
+
+
 def run_probability_backtest(
     year: int = 2018, *, allow_holdout: bool = False
 ) -> TournamentEval:
@@ -161,22 +202,59 @@ def main() -> None:
         action="store_true",
         help="Consume the one-time 2022 holdout touch (L2). Never use during tuning.",
     )
+    parser.add_argument(
+        "--model",
+        choices=("classifier", "dc"),
+        default="classifier",
+        help="Which engine to evaluate: classifier (baseline+XGBoost) or dc (Dixon-Coles).",
+    )
     args = parser.parse_args()
     configure_logging()
 
-    result = run_probability_backtest(args.year, allow_holdout=args.allow_holdout)
+    if args.year >= HOLDOUT_YEAR and not args.allow_holdout:
+        raise SystemExit(
+            f"{args.year} is the sacred holdout (L2). Pass --allow-holdout to consume the "
+            "one-time evaluation touch — and never tune against the result."
+        )
+
+    # Both engines share the same causal split + holdout seal, so they are comparable.
+    max_date = None if args.year >= HOLDOUT_YEAR else HOLDOUT_SEAL
+    matches = international_results.load(max_date=max_date)
+    if matches.empty:
+        raise SystemExit("No international results loaded; aborting.")
+    table = build_feature_table(matches).dropna(subset=["label"])
+    train, val = split_train_val(table, val_year=args.year)
+    train = train[train["date"] >= pd.Timestamp(TRAIN_START)]
+
+    if args.model == "dc":
+        result, reliability = evaluate_goals_model(args.year, train, val)
+        logger.info(
+            "=== %d World Cup out-of-sample (Dixon-Coles, %d train / %d eval) ===",
+            args.year,
+            len(train),
+            result.n,
+        )
+        _log_eval("Dixon-Coles", result)
+    else:
+        evaluation = evaluate_split(args.year, train, val)
+        logger.info(
+            "=== %d World Cup out-of-sample (%d train / %d eval matches) ===",
+            evaluation.year,
+            evaluation.n_train,
+            evaluation.n,
+        )
+        _log_eval("Logistic baseline", evaluation.baseline)
+        _log_eval("XGBoost+calibrated", evaluation.xgboost)
+        logger.info("Selected (better Brier): %s", evaluation.selected)
+        result, reliability = (
+            (evaluation.baseline, evaluation.reliability)
+            if evaluation.selected == "baseline"
+            else (evaluation.xgboost, evaluation.reliability)
+        )
+
     # A uniform 1/3-1/3-1/3 guesser scores Brier ~0.667; that is the bar to clear.
-    logger.info(
-        "=== %d World Cup out-of-sample (%d train / %d eval matches) ===",
-        result.year,
-        result.n_train,
-        result.n,
-    )
-    _log_eval("Logistic baseline", result.baseline)
-    _log_eval("XGBoost+calibrated", result.xgboost)
-    logger.info("Selected (better Brier): %s", result.selected)
     logger.info("Calibration (predicted-class confidence vs empirical accuracy):")
-    for mean_conf, emp_acc, count in result.reliability:
+    for mean_conf, emp_acc, count in reliability:
         logger.info("  conf=%.2f  acc=%.2f  n=%d", mean_conf, emp_acc, count)
 
 
