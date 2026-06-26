@@ -504,20 +504,37 @@ async def run_live(*, dry_run: bool = True) -> list[Signal]:
     history = await international_results.load_async()
     ratings = elo.final_ratings(history, use_tournament_k=True)
 
+    # Always-on squad-strength prior — runs at any horizon, so it shapes advance bets the
+    # lineup nudge can't reach. Empty (zero-impact) on the Kalshi-fallback path (no ids).
+    # Fetched here (before the DC fit) so its top-11 strength can also seed the goals model.
+    squad_ratings_by_team = await _fetch_squad_ratings(raw_fixtures, fixtures)
+
     # Build the live probability engine (config-selectable; DC is the validated default,
     # MODEL_ENGINE=classifier rolls back instantly). DC is fit once per run on the full
-    # history with ELO as the strength prior at the validated scale.
+    # history with ELO as the primary strength prior at the validated scale, and squad
+    # strength blended in as a secondary prior so star-laden squads lift their own
+    # attack/defense at fit time (refines data-sparse teams; data-rich teams override it).
     if settings.model_engine == "dc":
+        squad_strength_by_team = {
+            team: strength
+            for team, team_ratings in squad_ratings_by_team.items()
+            if (strength := squad.squad_strength(team_ratings)) is not None
+        }
         dc_model = dixon_coles.fit(
             history,
             cutoff=pd.Timestamp(datetime.now(timezone.utc)),
             strength=ratings,
             prior_scale=dixon_coles.DEFAULT_PRIOR_SCALE,
+            secondary=squad_strength_by_team or None,
+            secondary_weight=settings.dc_squad_prior_weight,
         )
         predictor = _dc_predictor(dc_model)
         logger.info(
-            "Live engine: Dixon-Coles (ELO prior, scale=%.2f)",
+            "Live engine: Dixon-Coles (ELO prior scale=%.2f, squad prior weight=%.2f "
+            "over %d team(s))",
             dixon_coles.DEFAULT_PRIOR_SCALE,
+            settings.dc_squad_prior_weight,
+            len(squad_strength_by_team),
         )
     else:
         bundle = predict_mod.load_bundle()
@@ -544,9 +561,6 @@ async def run_live(*, dry_run: bool = True) -> list[Signal]:
     lineups_by_fixture = (
         await _fetch_lineups(fixtures) if fixtures_have_real_ids else {}
     )
-    # Always-on squad-strength prior — runs at any horizon, so it shapes advance bets the
-    # lineup nudge can't reach. Empty (zero-impact) on the Kalshi-fallback path (no ids).
-    squad_ratings_by_team = await _fetch_squad_ratings(raw_fixtures, fixtures)
 
     signals = generate_signals(
         fixtures=fixtures,

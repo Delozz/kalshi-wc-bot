@@ -123,6 +123,61 @@ def test_zero_prior_scale_is_unchanged() -> None:
     assert a.defense == b.defense
 
 
+def test_secondary_signal_lifts_a_team_the_primary_underrates() -> None:
+    # The squad-into-DC path: a data-sparse team the PRIMARY (ELO) prior rates only average
+    # but a strong SECONDARY (squad) signal flags as elite should end up rated higher WITH
+    # the secondary than with ELO alone — star power ELO under-states still reaches the model.
+    base = _synthetic()
+    extra = pd.DataFrame(
+        {
+            "date": [
+                pd.Timestamp("2016-06-01", tz="UTC") + pd.Timedelta(days=int(d))
+                for d in range(4)
+            ],
+            "home_team": ["Newcomer", "Mid", "Newcomer", "Weak"],
+            "away_team": ["Mid", "Newcomer", "Weak", "Newcomer"],
+            "fthg": [1, 1, 1, 1],
+            "ftag": [1, 1, 1, 1],
+            "neutral": [True, True, True, True],
+        }
+    )
+    matches = pd.concat([base, extra], ignore_index=True)
+    elo = {"Strong": 1900.0, "Mid": 1600.0, "Weak": 1400.0, "Newcomer": 1500.0}
+    squad = {"Strong": 6.5, "Mid": 6.8, "Weak": 6.6, "Newcomer": 8.5}
+
+    elo_only = dc.fit(matches, min_matches=3, strength=elo, prior_scale=0.4)
+    blended = dc.fit(
+        matches,
+        min_matches=3,
+        strength=elo,
+        prior_scale=0.4,
+        secondary=squad,
+        secondary_weight=1.0,
+    )
+
+    elo_net = elo_only.attack["Newcomer"] - elo_only.defense["Newcomer"]
+    blended_net = blended.attack["Newcomer"] - blended.defense["Newcomer"]
+    assert blended_net > elo_net
+
+
+def test_secondary_weight_zero_matches_primary_only() -> None:
+    # secondary_weight=0 (or no secondary) must reproduce the primary-only fit exactly —
+    # this is the backtest path, so the validated ELO behaviour stays byte-identical.
+    matches = _synthetic()
+    elo = {"Strong": 1900.0, "Mid": 1600.0, "Weak": 1400.0}
+    a = dc.fit(matches, min_matches=3, strength=elo, prior_scale=0.4)
+    b = dc.fit(
+        matches,
+        min_matches=3,
+        strength=elo,
+        prior_scale=0.4,
+        secondary={"Strong": 9.0, "Weak": 5.0},
+        secondary_weight=0.0,
+    )
+    assert a.attack == b.attack
+    assert a.defense == b.defense
+
+
 def test_rho_shifts_draw_mass() -> None:
     # The DC correction with positive rho changes the draw balance vs rho = 0.
     common = dict(

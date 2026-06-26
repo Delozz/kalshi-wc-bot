@@ -197,32 +197,56 @@ def _neg_log_likelihood(
     return float(-np.sum(weights * ll) + penalty)
 
 
+def _zscore(teams: list[str], values: Mapping[str, float]) -> np.ndarray:
+    """Z-score a per-team signal across the modelled teams (0 for teams it doesn't cover).
+
+    Teams missing from ``values`` (or the whole signal, if fewer than two teams are covered
+    or it has no spread) contribute 0.0 — they neither lift nor drag the prior.
+    """
+    raw = np.array([float(values.get(team, np.nan)) for team in teams])
+    seen = ~np.isnan(raw)
+    if seen.sum() < 2:
+        return np.zeros(len(teams))
+    mean = raw[seen].mean()
+    std = raw[seen].std()
+    if std <= 0:
+        return np.zeros(len(teams))
+    return np.where(seen, (raw - mean) / std, 0.0)
+
+
 def _strength_prior(
     teams: list[str],
     strength: Mapping[str, float] | None,
     prior_scale: float,
+    *,
+    secondary: Mapping[str, float] | None = None,
+    secondary_weight: float = 0.0,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Turn an external per-team strength signal into (prior_attack, prior_defense).
+    """Turn external per-team strength signal(s) into (prior_attack, prior_defense).
 
-    The strength values (e.g. ELO, or squad rating for live) are z-scored across the
-    modelled teams, then mapped so a stronger team gets higher attack and *more negative*
-    defense (concedes fewer): ``prior_attack = scale*z``, ``prior_defense = -scale*z``. The
-    prior is mean-zero by construction, so it shifts where ratings shrink *to* without
-    moving the overall level. Returns zero arrays when no strength is supplied — identical
-    to the original shrink-to-average behaviour.
+    The (z-scored) strength is mapped so a stronger team gets higher attack and *more
+    negative* defense (concedes fewer): ``prior_attack = scale*z``, ``prior_defense =
+    -scale*z``. The prior is mean-zero by construction, so it shifts where ratings shrink
+    *to* without moving the overall level.
+
+    ``strength`` is the primary signal (ELO in the backtest and live). ``secondary``
+    (optional) is a second signal — squad rating for live — blended in at ``secondary_weight``
+    relative to the primary's unit-variance z-score: ``z_combined = z_primary +
+    secondary_weight * z_secondary``. A team the secondary doesn't cover keeps only the
+    primary's z, so squad refines the prior for the teams it knows without disturbing the
+    rest. With no ``secondary`` (the backtest path) this is byte-identical to the original
+    single-signal prior, so the validated ELO behaviour is preserved.
     """
     n = len(teams)
-    if not strength or prior_scale == 0.0:
+    if prior_scale == 0.0 or (not strength and not secondary):
         return np.zeros(n), np.zeros(n)
-    raw = np.array([float(strength.get(team, np.nan)) for team in teams])
-    seen = ~np.isnan(raw)
-    if seen.sum() < 2:
-        return np.zeros(n), np.zeros(n)
-    mean = raw[seen].mean()
-    std = raw[seen].std()
-    z = np.where(seen, (raw - mean) / std, 0.0) if std > 0 else np.zeros(n)
-    prior_attack = prior_scale * z
-    prior_defense = -prior_scale * z
+    combined = np.zeros(n)
+    if strength:
+        combined = combined + _zscore(teams, strength)
+    if secondary and secondary_weight != 0.0:
+        combined = combined + secondary_weight * _zscore(teams, secondary)
+    prior_attack = prior_scale * combined
+    prior_defense = -prior_scale * combined
     return prior_attack, prior_defense
 
 
@@ -237,6 +261,8 @@ def fit(
     maxiter: int = 1000,
     strength: Mapping[str, float] | None = None,
     prior_scale: float = 0.0,
+    secondary: Mapping[str, float] | None = None,
+    secondary_weight: float = 0.0,
 ) -> DixonColesModel:
     """Fit attack/defense/home-adv/rho by time-decayed, ridge-penalised Poisson MLE.
 
@@ -245,11 +271,17 @@ def fit(
     ``lookahead_guard`` (L1). Teams with fewer than ``min_matches`` appearances are dropped
     and fall back to average (0/0) ratings at prediction time.
 
-    ``strength`` (optional) is an external per-team strength signal — ELO in the backtest,
-    squad rating for live — that the ridge shrinks the ratings *toward* (scaled by
-    ``prior_scale``). This lets a star-laden or highly-rated side carry strength the raw
-    scorelines under-state, especially for teams with sparse history. With no ``strength``
-    the fit is unchanged (shrink toward average).
+    ``strength`` (optional) is the primary per-team strength signal — ELO in the backtest
+    and live — that the ridge shrinks the ratings *toward* (scaled by ``prior_scale``). This
+    lets a strong side carry strength the raw scorelines under-state, especially for teams
+    with sparse history. With no ``strength`` the fit is unchanged (shrink toward average).
+
+    ``secondary`` (optional, weighted by ``secondary_weight``) blends a second signal into
+    that prior — squad rating for live, so a star-laden squad (Ronaldo, Haaland) lifts its
+    own attack/defense prior at fit time, not only via the post-model tilt. It refines only
+    the teams it covers; everything else keeps the ELO-only prior. NOTE: no historical squad
+    ratings exist (API-Football is current-season only), so this blend is *not* part of the
+    2018/2022 validation — keep it demo-checked and conservatively weighted.
     """
     if cutoff is None:
         cutoff = pd.to_datetime(matches["date"], utc=True).max()
@@ -262,7 +294,13 @@ def fit(
         matches, cutoff=cutoff, xi=xi, min_matches=min_matches
     )
     n = len(teams)
-    prior_attack, prior_defense = _strength_prior(teams, strength, prior_scale)
+    prior_attack, prior_defense = _strength_prior(
+        teams,
+        strength,
+        prior_scale,
+        secondary=secondary,
+        secondary_weight=secondary_weight,
+    )
 
     # Init at the prior (not zero): seeds the optimiser near the strength-implied ratings,
     # a mild positive home advantage, zero correlation.
