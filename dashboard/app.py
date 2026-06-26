@@ -61,6 +61,45 @@ def _recent_signals(
         return []
 
 
+def _signal_for_ticker(ticker: str) -> dict[str, Any] | None:
+    """Most recent stored signal for a market ticker, or None on any failure (L9).
+
+    Used to explain an *open position*: the position table only knows the ticker, so we
+    pull the latest signal row that targeted it to recover the model/market/edge thesis.
+    """
+    if not ticker:
+        return None
+    try:
+        from data.db import connect
+
+        with connect() as conn:
+            row = conn.execute(
+                "SELECT market_ticker, match_id, model_prob, market_implied, edge, "
+                "bet_size_cents FROM signals WHERE market_ticker = ? "
+                "ORDER BY generated_at DESC LIMIT 1",
+                (ticker,),
+            ).fetchone()
+        return dict(row) if row else None
+    except Exception as exc:  # noqa: BLE001 — dashboard must render even with no DB
+        logger.debug("Could not read signal for %s: %s", ticker, exc)
+        return None
+
+
+def _position_theses(positions: list[Any]) -> dict[str, str]:
+    """Map each open position's ticker to its bet thesis from the originating signal.
+
+    Resolved here (not in ``render``) so the renderer stays a pure display function, the
+    same split already used for ``_recent_signals``. Tickers with no stored signal are
+    simply omitted; the renderer shows a dash for those.
+    """
+    theses: dict[str, str] = {}
+    for pos in positions:
+        sig = _signal_for_ticker(pos.ticker)
+        if sig:
+            theses[pos.ticker] = explain_signal(sig)
+    return theses
+
+
 def _decode_match(match_id: str) -> str | None:
     """Turn a ``"{fixture}:{outcome}:{home}_{away}"`` match_id into a readable bet thesis.
 
@@ -101,10 +140,16 @@ def render(
     state: PortfolioState,
     signals: list[dict[str, Any]],
     *,
+    position_theses: dict[str, str] | None = None,
     console: Console | None = None,
 ) -> None:
-    """Render the dashboard tables to the console."""
+    """Render the dashboard tables to the console.
+
+    ``position_theses`` maps an open position's ticker to its plain-English bet thesis
+    (from ``_position_theses``); tickers absent from it render as a dash.
+    """
     console = console or Console()
+    position_theses = position_theses or {}
 
     summary = Table(title=f"KALSHI WC BOT — {settings.kalshi_env.upper()}")
     summary.add_column("Metric")
@@ -116,11 +161,15 @@ def render(
     console.print(summary)
 
     positions = Table(title="OPEN POSITIONS")
-    for column in ("Ticker", "Side", "Count", "Avg cents"):
+    for column in ("Ticker", "Side", "Count", "Avg cents", "Why"):
         positions.add_column(column)
     for pos in state.positions:
         positions.add_row(
-            pos.ticker, pos.side, str(pos.count), str(pos.avg_price_cents)
+            pos.ticker,
+            pos.side,
+            str(pos.count),
+            str(pos.avg_price_cents),
+            position_theses.get(pos.ticker, "—"),
         )
     console.print(positions)
 
@@ -143,7 +192,11 @@ def main() -> None:
         bankroll_cents=settings.initial_bankroll_cents,
         peak_bankroll_cents=settings.initial_bankroll_cents,
     )
-    render(state, _recent_signals())
+    render(
+        state,
+        _recent_signals(),
+        position_theses=_position_theses(state.positions),
+    )
 
 
 if __name__ == "__main__":

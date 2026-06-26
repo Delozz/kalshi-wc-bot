@@ -81,3 +81,65 @@ def test_explain_signal_falls_back_without_teams() -> None:
     # Unparseable match_id still yields the model-vs-market thesis (never crashes).
     text = app.explain_signal(_sig("garbage"))
     assert text == "model 38% vs market 30% (+8.1% edge), half-Kelly"
+
+
+class _Pos:
+    """Minimal stand-in for execution.portfolio.Position (only .ticker is read)."""
+
+    def __init__(self, ticker: str) -> None:
+        self.ticker = ticker
+
+
+def test_position_theses_explains_held_positions(tmp_path, monkeypatch) -> None:
+    # An open position gets the thesis of the LATEST signal that targeted its ticker, so
+    # the dashboard can show *why* each held bet was placed (the gap reported on the live
+    # run: open positions showed no rationale).
+    path = tmp_path / "t.sqlite"
+    db.init_db(path)
+    conn = db.connect(path)
+    now = datetime.now(timezone.utc)
+    conn.execute(
+        "INSERT INTO signals (match_id, market_ticker, side, model_prob, market_implied, "
+        "edge, kelly_fraction, bet_size_cents, generated_at) VALUES (?,?,?,?,?,?,?,?,?)",
+        (
+            "1:H:France_Iraq",
+            "FRA-H",
+            "YES",
+            0.55,
+            0.40,
+            0.15,
+            0.5,
+            199,
+            now.isoformat(),
+        ),
+    )
+    conn.commit()
+    conn.close()
+    original = db.connect
+    monkeypatch.setattr(db, "connect", lambda db_path=None: original(path))
+
+    theses = app._position_theses([_Pos("FRA-H"), _Pos("UNKNOWN")])
+    assert theses["FRA-H"].startswith("France to beat Iraq:")
+    assert "UNKNOWN" not in theses  # no signal row -> omitted (renders as a dash)
+
+
+def test_signal_for_ticker_picks_most_recent(tmp_path, monkeypatch) -> None:
+    # When a market has been signalled across cycles, the position thesis uses the newest.
+    path = tmp_path / "t.sqlite"
+    db.init_db(path)
+    conn = db.connect(path)
+    now = datetime.now(timezone.utc)
+    _insert(conn, "REPEAT", 100, now - timedelta(hours=2))
+    conn.execute(
+        "INSERT INTO signals (match_id, market_ticker, side, model_prob, market_implied, "
+        "edge, kelly_fraction, bet_size_cents, generated_at) VALUES (?,?,?,?,?,?,?,?,?)",
+        ("1:H:A_B", "REPEAT", "YES", 0.6, 0.5, 0.1, 0.5, 250, now.isoformat()),
+    )
+    conn.commit()
+    conn.close()
+    original = db.connect
+    monkeypatch.setattr(db, "connect", lambda db_path=None: original(path))
+
+    sig = app._signal_for_ticker("REPEAT")
+    assert sig is not None
+    assert sig["match_id"] == "1:H:A_B"  # the newer row, not the 2-hours-old one
