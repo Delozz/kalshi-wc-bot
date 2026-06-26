@@ -48,4 +48,21 @@ if (Test-Path $venvPy) {
 "$(Get-Date -Format o)  python=$python" | Out-File -FilePath $logFile -Append -Encoding utf8
 
 "$(Get-Date -Format o)  starting persistent loop (live-orders)" | Out-File -FilePath $logFile -Append -Encoding utf8
-& $python -m scheduler.jobs --live-orders *>> $logFile
+
+# Start-Process redirects at the OS level — captures output even if Python dies before
+# writing a single byte (unlike the PowerShell pipeline which requires bytes to flow).
+$stdoutLog = Join-Path $logDir "scheduler_stdout.log"
+$stderrLog = Join-Path $logDir "scheduler_stderr.log"
+$proc = Start-Process -FilePath $python `
+    -ArgumentList "-m", "scheduler.jobs", "--live-orders" `
+    -WorkingDirectory $root `
+    -RedirectStandardOutput $stdoutLog `
+    -RedirectStandardError  $stderrLog `
+    -PassThru -NoNewWindow
+$proc.WaitForExit()
+$code = $proc.ExitCode
+
+# Merge stdout + stderr into the main log for a single trail.
+if (Test-Path $stdoutLog) { Get-Content $stdoutLog | Out-File -FilePath $logFile -Append -Encoding utf8 }
+if (Test-Path $stderrLog) { Get-Content $stderrLog | Out-File -FilePath $logFile -Append -Encoding utf8 }
+"$(Get-Date -Format o)  scheduler.jobs exited (code $code)" | Out-File -FilePath $logFile -Append -Encoding utf8
