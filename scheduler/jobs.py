@@ -193,7 +193,7 @@ def build_scheduler() -> BlockingScheduler:
 def _render_dashboard() -> None:
     """Render the dashboard for the current portfolio + recent signals (best effort)."""
     try:
-        from dashboard.app import _recent_signals, render
+        from dashboard.app import _position_theses, _recent_signals, render
         from execution.portfolio import PortfolioState
 
         state = CONTEXT.get("portfolio")
@@ -202,7 +202,11 @@ def _render_dashboard() -> None:
                 bankroll_cents=settings.initial_bankroll_cents,
                 peak_bankroll_cents=settings.initial_bankroll_cents,
             )
-        render(state, _recent_signals())
+        render(
+            state,
+            _recent_signals(),
+            position_theses=_position_theses(state.positions),
+        )
     except Exception as exc:  # noqa: BLE001 — dashboard is non-critical
         logger.warning("Dashboard render failed: %s", exc)
 
