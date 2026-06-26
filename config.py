@@ -19,6 +19,7 @@ PROCESSED_DIR: Path = DATA_DIR / "processed"
 ARTIFACTS_DIR: Path = PROJECT_ROOT / "model" / "artifacts"
 
 KalshiEnv = Literal["demo", "prod"]
+ModelEngine = Literal["classifier", "dc"]
 
 
 def _get_str(key: str, default: str) -> str:
@@ -45,6 +46,7 @@ class Settings:
     api_football_key: str
     the_odds_api_key: str
     kalshi_env: KalshiEnv
+    model_engine: ModelEngine
     min_edge_threshold: float
     max_bet_fraction: float
     max_portfolio_exposure: float
@@ -53,6 +55,7 @@ class Settings:
     initial_bankroll_cents: int
     lineup_weight: float
     squad_weight: float
+    dc_squad_prior_weight: float
     db_path: Path
     log_level: str
 
@@ -61,12 +64,29 @@ def load_settings() -> Settings:
     """Build a Settings snapshot from the current environment."""
     env_raw = _get_str("KALSHI_ENV", "demo")
     kalshi_env: KalshiEnv = "prod" if env_raw == "prod" else "demo"
+    # Live probability engine. "dc" = Dixon-Coles goals model with the ELO strength prior
+    # (validated out-of-sample, the production default); "classifier" = the original
+    # logistic/XGBoost bundle (instant rollback via MODEL_ENGINE=classifier).
+    engine_raw = _get_str("MODEL_ENGINE", "dc")
+    model_engine: ModelEngine = "classifier" if engine_raw == "classifier" else "dc"
+    # Prefer env-specific credentials; fall back to the generic pair for existing .env files.
+    _demo_key = _get_str("KALSHI_DEMO_API_KEY", "") or _get_str("KALSHI_API_KEY", "")
+    _demo_secret = _get_str("KALSHI_DEMO_API_SECRET", "") or _get_str(
+        "KALSHI_API_SECRET", ""
+    )
+    _prod_key = _get_str("KALSHI_PROD_API_KEY", "") or _get_str("KALSHI_API_KEY", "")
+    _prod_secret = _get_str("KALSHI_PROD_API_SECRET", "") or _get_str(
+        "KALSHI_API_SECRET", ""
+    )
+    kalshi_api_key = _demo_key if kalshi_env == "demo" else _prod_key
+    kalshi_api_secret = _demo_secret if kalshi_env == "demo" else _prod_secret
     return Settings(
-        kalshi_api_key=_get_str("KALSHI_API_KEY", ""),
-        kalshi_api_secret=_get_str("KALSHI_API_SECRET", ""),
+        kalshi_api_key=kalshi_api_key,
+        kalshi_api_secret=kalshi_api_secret,
         api_football_key=_get_str("API_FOOTBALL_KEY", ""),
         the_odds_api_key=_get_str("THE_ODDS_API_KEY", ""),
         kalshi_env=kalshi_env,
+        model_engine=model_engine,
         min_edge_threshold=_get_float("MIN_EDGE_THRESHOLD", 0.04),
         max_bet_fraction=_get_float("MAX_BET_FRACTION", 0.05),
         max_portfolio_exposure=_get_float("MAX_PORTFOLIO_EXPOSURE", 0.20),
@@ -81,6 +101,13 @@ def load_settings() -> Settings:
         # replay against real bets — a meaningful but calibration-safe tilt given how
         # compressed national-team ratings are. 0 disables the squad prior entirely.
         squad_weight=_get_float("SQUAD_WEIGHT", 4.0),
+        # Weight of the squad-strength signal blended into the Dixon-Coles ELO prior at fit
+        # time (relative to ELO's unit-variance z-score). Lets a star-laden squad lift its
+        # own attack/defense prior, refining data-sparse teams without disturbing data-rich
+        # ones (the MLE overrides the prior there). NOTE: unvalidated on history — no past
+        # squad ratings exist — so kept modest and demo-checked. 0 disables it. Only the DC
+        # engine reads this; the classifier path is unaffected.
+        dc_squad_prior_weight=_get_float("DC_SQUAD_PRIOR_WEIGHT", 0.5),
         db_path=Path(_get_str("DB_PATH", "data/db.sqlite")),
         log_level=_get_str("LOG_LEVEL", "INFO"),
     )

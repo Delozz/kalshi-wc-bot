@@ -24,6 +24,7 @@ import pandas as pd
 from config import settings
 from features import elo, lineup, squad
 from ingestion.api_football import Fixture
+from model import dixon_coles
 from model import predict as predict_mod
 from model.dataset import WC_HOSTS, build_live_features
 from schemas import Signal
@@ -36,6 +37,33 @@ logger = logging.getLogger(__name__)
 MarketResolver = Callable[
     [Fixture, list[dict[str, Any]]], dict[str, "tuple[str, float]"]
 ]
+
+# A probability engine: maps a fixture (+ its prebuilt feature dict) to {H, D, A} probs.
+# This is the one seam between signal generation and the model, so the engine is
+# swappable (classifier vs Dixon-Coles) without touching edge/risk/sizing downstream.
+Predictor = Callable[[Fixture, dict[str, float]], dict[str, float]]
+
+
+def _classifier_predictor(bundle: dict[str, Any]) -> Predictor:
+    """The logistic/XGBoost bundle engine: predicts from the engineered feature vector."""
+
+    def predict(_fixture: Fixture, features: dict[str, float]) -> dict[str, float]:
+        return predict_mod.predict_outcome(bundle, features)
+
+    return predict
+
+
+def _dc_predictor(model: dixon_coles.DixonColesModel) -> Predictor:
+    """The Dixon-Coles goals engine: predicts from team names off the fitted score model.
+
+    WC venues are neutral, so home advantage stays off — consistent with the feature path,
+    which also builds features with ``neutral=True``. The feature dict is ignored (DC reads
+    team strength from its own fitted attack/defense ratings)."""
+
+    def predict(fixture: Fixture, _features: dict[str, float]) -> dict[str, float]:
+        return model.predict_hda(fixture.home_team, fixture.away_team, neutral=True)
+
+    return predict
 
 
 def _year_of(iso: str) -> int:
@@ -134,7 +162,7 @@ def generate_signals(
     fixtures: list[Fixture],
     history: pd.DataFrame,
     ratings: dict[str, float],
-    bundle: dict[str, Any],
+    bundle: dict[str, Any] | None = None,
     markets: list[dict[str, Any]],
     bankroll_cents: int,
     peak_bankroll_cents: int | None = None,
@@ -147,6 +175,7 @@ def generate_signals(
         dict[int, tuple[dict[str, Any] | None, dict[str, Any] | None]] | None
     ) = None,
     squad_ratings_by_team: dict[str, dict[int, float]] | None = None,
+    predictor: Predictor | None = None,
 ) -> list[Signal]:
     """Produce sized, risk-checked signals across all outcomes for the given fixtures.
 
@@ -160,8 +189,17 @@ def generate_signals(
     player ratings ``{player_id: rating}``. When present, an always-on squad-strength prior
     tilts the full {H, D, A} vector toward the stronger squad *before* the edge check —
     available at any horizon, so it shapes advance bets where the announced-lineup nudge is
-    still 0.0. Teams with no ratings contribute a 0.0 delta (zero-impact fallback)."""
+    still 0.0. Teams with no ratings contribute a 0.0 delta (zero-impact fallback).
+
+    ``predictor`` (optional) is the probability engine — a ``(fixture, features) -> {H,D,A}``
+    callable. Defaults to the classifier ``bundle``; ``run_live`` injects the Dixon-Coles
+    engine instead when ``MODEL_ENGINE=dc``. The squad nudge and risk filters run identically
+    on whatever base probabilities the engine returns."""
     hosts_by_year = hosts_by_year or WC_HOSTS
+    # Engine seam: use the injected predictor, else fall back to the classifier bundle.
+    predict = (
+        predictor if predictor is not None else _classifier_predictor(bundle or {})
+    )
     bankroll = bankroll_cents / 100.0
     peak = (
         peak_bankroll_cents if peak_bankroll_cents is not None else bankroll_cents
@@ -190,7 +228,7 @@ def generate_signals(
             neutral=True,
             host=host,
         )
-        probs = predict_mod.predict_outcome(bundle, features)
+        probs = predict(fixture, features)
 
         # Always-on squad-strength prior: tilt the {H,D,A} vector toward the stronger
         # squad. Squad ratings are available at any horizon (unlike announced lineups), so
@@ -443,10 +481,6 @@ async def run_live(*, dry_run: bool = True) -> list[Signal]:
     from execution import order_manager, portfolio
     from ingestion import api_football, international_results, kalshi
 
-    bundle = predict_mod.load_bundle()
-    if bundle is None:
-        return []
-
     raw_fixtures = await api_football.fetch_fixtures()
     fixtures = api_football.upcoming(api_football.parse_fixtures(raw_fixtures))
     # Lineups are only fetchable for real API-Football fixture ids; the Kalshi fallback
@@ -470,6 +504,45 @@ async def run_live(*, dry_run: bool = True) -> list[Signal]:
     history = await international_results.load_async()
     ratings = elo.final_ratings(history, use_tournament_k=True)
 
+    # Always-on squad-strength prior — runs at any horizon, so it shapes advance bets the
+    # lineup nudge can't reach. Empty (zero-impact) on the Kalshi-fallback path (no ids).
+    # Fetched here (before the DC fit) so its top-11 strength can also seed the goals model.
+    squad_ratings_by_team = await _fetch_squad_ratings(raw_fixtures, fixtures)
+
+    # Build the live probability engine (config-selectable; DC is the validated default,
+    # MODEL_ENGINE=classifier rolls back instantly). DC is fit once per run on the full
+    # history with ELO as the primary strength prior at the validated scale, and squad
+    # strength blended in as a secondary prior so star-laden squads lift their own
+    # attack/defense at fit time (refines data-sparse teams; data-rich teams override it).
+    if settings.model_engine == "dc":
+        squad_strength_by_team = {
+            team: strength
+            for team, team_ratings in squad_ratings_by_team.items()
+            if (strength := squad.squad_strength(team_ratings)) is not None
+        }
+        dc_model = dixon_coles.fit(
+            history,
+            cutoff=pd.Timestamp(datetime.now(timezone.utc)),
+            strength=ratings,
+            prior_scale=dixon_coles.DEFAULT_PRIOR_SCALE,
+            secondary=squad_strength_by_team or None,
+            secondary_weight=settings.dc_squad_prior_weight,
+        )
+        predictor = _dc_predictor(dc_model)
+        logger.info(
+            "Live engine: Dixon-Coles (ELO prior scale=%.2f, squad prior weight=%.2f "
+            "over %d team(s))",
+            dixon_coles.DEFAULT_PRIOR_SCALE,
+            settings.dc_squad_prior_weight,
+            len(squad_strength_by_team),
+        )
+    else:
+        bundle = predict_mod.load_bundle()
+        if bundle is None:
+            return []
+        predictor = _classifier_predictor(bundle)
+        logger.info("Live engine: classifier bundle")
+
     state = await portfolio.sync_from_kalshi(
         fallback_bankroll_cents=settings.initial_bankroll_cents
     )
@@ -488,15 +561,12 @@ async def run_live(*, dry_run: bool = True) -> list[Signal]:
     lineups_by_fixture = (
         await _fetch_lineups(fixtures) if fixtures_have_real_ids else {}
     )
-    # Always-on squad-strength prior — runs at any horizon, so it shapes advance bets the
-    # lineup nudge can't reach. Empty (zero-impact) on the Kalshi-fallback path (no ids).
-    squad_ratings_by_team = await _fetch_squad_ratings(raw_fixtures, fixtures)
 
     signals = generate_signals(
         fixtures=fixtures,
         history=history,
         ratings=ratings,
-        bundle=bundle,
+        predictor=predictor,
         markets=markets,
         bankroll_cents=state.bankroll_cents,
         peak_bankroll_cents=state.peak_bankroll_cents,
