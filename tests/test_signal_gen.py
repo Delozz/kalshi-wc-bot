@@ -136,7 +136,7 @@ def test_no_signal_when_no_market_matches(monkeypatch) -> None:
 
 
 def test_scarce_slot_goes_to_highest_edge_not_first_processed(monkeypatch) -> None:
-    # Only one position slot is free (n_open=2, cap=3). The away leg has the larger edge
+    # Only one position slot is free (n_open=4, cap=5). The away leg has the larger edge
     # (0.15) but is the LAST outcome processed; home is smaller (0.10) but processed first.
     # The pre-fix chronological code would have filled the slot with home; ranking by edge
     # first must instead award it to away.
@@ -151,7 +151,7 @@ def test_scarce_slot_goes_to_highest_edge_not_first_processed(monkeypatch) -> No
         # Away leg stays above the 6c floor (9c) so it remains the highest-edge candidate.
         markets=_markets(50, 40, 9),
         bankroll_cents=20000,
-        n_open=2,
+        n_open=4,
     )
     assert len(signals) == 1
     assert signals[0]["market_ticker"] == "KXWC26-BRA-A"
