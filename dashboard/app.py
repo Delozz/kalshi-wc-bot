@@ -16,7 +16,7 @@ from rich.console import Console
 from rich.table import Table
 
 from config import configure_logging, settings
-from execution.portfolio import PortfolioState
+from execution.portfolio import PortfolioState, sync_from_kalshi
 
 logger = logging.getLogger(__name__)
 
@@ -187,10 +187,11 @@ def render(
 
 
 def main() -> None:
+    import asyncio
+
     configure_logging()
-    state = PortfolioState(
-        bankroll_cents=settings.initial_bankroll_cents,
-        peak_bankroll_cents=settings.initial_bankroll_cents,
+    state = asyncio.run(
+        sync_from_kalshi(fallback_bankroll_cents=settings.initial_bankroll_cents)
     )
     render(
         state,

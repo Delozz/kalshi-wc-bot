@@ -12,7 +12,7 @@ Ingest → Features → Model → Edge Detection → Kelly Sizing → Order → 
 
 1. **Ingest** — Pull live fixtures (API-Football), historical results (martj42 CSV), announced lineups, and live Kalshi market prices
 2. **Features** — ELO ratings, rolling form, head-to-head stats, StatsBomb xG averages, Pinnacle no-vig implied probabilities, lineup strength delta
-3. **Model** — XGBoost multi-class classifier (Home / Draw / Away) with Platt-scaling calibration; baseline logistic regression must be beaten before production use
+3. **Model** — Dixon-Coles goals model with ELO strength prior (default); XGBoost multi-class classifier (Home / Draw / Away) with Platt-scaling calibration as fallback. Switch with `MODEL_ENGINE=classifier`. Baseline logistic regression must be beaten before production use
 4. **Edge Detection** — `edge = model_prob − kalshi_implied_prob`; threshold ≥ 4% required to generate a signal
 5. **Kelly Sizing** — Half-Kelly with a hard 5%-of-bankroll cap per bet; calibration must precede sizing
 6. **Execution** — Kalshi V2 limit orders (`POST /portfolio/events/orders`); demo paper-run required before prod
@@ -100,13 +100,21 @@ copy .env.example .env
 ### `.env` keys required
 
 ```
-KALSHI_API_KEY=          # Your Kalshi API key ID
-KALSHI_API_SECRET=       # Path to RSA private key PEM, or PEM text inline
-KALSHI_ENV=demo          # "demo" for paper trading, "prod" for live
-API_FOOTBALL_KEY=        # API-Football key
-ODDS_API_KEY=            # The Odds API key
-INITIAL_BANKROLL_CENTS=  # Starting bankroll in cents (e.g. 10000 = $100)
-LINEUP_WEIGHT=0.10       # Lineup strength adjustment weight (default 0.10)
+KALSHI_ENV=demo                    # "demo" for paper trading, "prod" for live
+
+# Separate key pairs — switching KALSHI_ENV is all that's needed
+KALSHI_DEMO_API_KEY=               # Demo account key ID
+KALSHI_DEMO_API_SECRET=            # Demo RSA private key (PEM text or path)
+KALSHI_PROD_API_KEY=               # Prod account key ID
+KALSHI_PROD_API_SECRET=            # Prod RSA private key (PEM text or path)
+
+API_FOOTBALL_KEY=                  # API-Football key
+THE_ODDS_API_KEY=                  # The Odds API key
+
+MODEL_ENGINE=dc                    # "dc" (Dixon-Coles, default) or "classifier"
+INITIAL_BANKROLL_CENTS=5000        # Starting bankroll in cents (e.g. 5000 = $50)
+LINEUP_WEIGHT=0.10                 # Lineup strength adjustment weight
+DC_SQUAD_PRIOR_WEIGHT=0.5         # Squad-strength blend into DC ELO prior (0 = off)
 ```
 
 > **Never commit `.env`** — it is gitignored. See `.env.example` for the template.
@@ -147,6 +155,31 @@ black --check .
 
 ---
 
+## Running 24/7 (Windows Task Scheduler)
+
+The bot can run unattended via a Windows Scheduled Task that restarts automatically on crash and survives reboots.
+
+```powershell
+# Register the task (run once in elevated PowerShell)
+# See scripts/run_scheduler.ps1 for the launcher used by the task
+
+# Check task health
+& ".\scripts\status.ps1"
+
+# Stop the loop (keeps task registered for next time)
+Stop-ScheduledTask -TaskName "KalshiWCBotLoop"
+
+# Disable until manually re-enabled
+Disable-ScheduledTask -TaskName "KalshiWCBotLoop"
+
+# Re-enable
+Enable-ScheduledTask -TaskName "KalshiWCBotLoop"
+```
+
+Logs are written to `data/logs/scheduler.log`. Sleep/hibernate must be disabled (`powercfg /change standby-timeout-ac 0`) — a sleeping PC freezes the loop. The PC must be powered on at tournament time; the task recovers automatically at next boot via the `AtStartup` trigger.
+
+---
+
 ## Key Safety Rules
 
 | Rule | What It Prevents |
@@ -169,7 +202,7 @@ black --check .
 | Max bet size | 5% of bankroll | Hard cap per position |
 | Max portfolio exposure | 20% of bankroll | Sum of all open position sizes |
 | Stop-loss | 25% drawdown from peak | Halts all betting if breached |
-| Max open positions | 3 | Concurrent open position limit |
+| Max open positions | 5 | Concurrent open position limit |
 
 ---
 
