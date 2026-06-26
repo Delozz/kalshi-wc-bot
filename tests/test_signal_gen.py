@@ -306,6 +306,26 @@ def test_squad_prior_suppresses_bets_against_stronger_squad(monkeypatch) -> None
     assert "D" not in legs and "A" not in legs
 
 
+def test_held_market_is_not_rebet(monkeypatch) -> None:
+    # The no-re-bet guard: a market already in the portfolio is skipped in the candidate
+    # phase, so a persistent edge can't grow the same position across cycles (the Iran
+    # 9 -> 16 topping-up). The other two legs still generate normally.
+    monkeypatch.setattr(signal_gen.predict_mod, "predict_outcome", _fixed_probs)
+    history = _history()
+    signals = signal_gen.generate_signals(
+        fixtures=[_fixture()],
+        history=history,
+        ratings=_ratings(history),
+        bundle={},
+        markets=_markets(30, 15, 10),
+        bankroll_cents=20000,
+        held_tickers={"KXWC26-BRA-H"},
+    )
+    legs = {s["market_ticker"] for s in signals}
+    assert "KXWC26-BRA-H" not in legs  # already held -> skipped, never re-bet
+    assert legs == {"KXWC26-BRA-D", "KXWC26-BRA-A"}
+
+
 def test_risk_blocks_on_stop_loss(monkeypatch) -> None:
     monkeypatch.setattr(signal_gen.predict_mod, "predict_outcome", _fixed_probs)
     history = _history()

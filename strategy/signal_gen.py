@@ -168,6 +168,7 @@ def generate_signals(
     peak_bankroll_cents: int | None = None,
     open_exposure_cents: int = 0,
     n_open: int = 0,
+    held_tickers: set[str] | None = None,
     resolver: MarketResolver = default_outcome_resolver,
     hosts_by_year: dict[int, set[str]] | None = None,
     threshold: float | None = None,
@@ -194,8 +195,16 @@ def generate_signals(
     ``predictor`` (optional) is the probability engine — a ``(fixture, features) -> {H,D,A}``
     callable. Defaults to the classifier ``bundle``; ``run_live`` injects the Dixon-Coles
     engine instead when ``MODEL_ENGINE=dc``. The squad nudge and risk filters run identically
-    on whatever base probabilities the engine returns."""
+    on whatever base probabilities the engine returns.
+
+    ``held_tickers`` (optional) is the set of market tickers we already hold an open position
+    in; any candidate on one of them is skipped, so the bot never averages into an existing
+    position across cycles (one entry per market). ``run_live`` passes the live portfolio's
+    tickers; the position/exposure caps still apply on top."""
     hosts_by_year = hosts_by_year or WC_HOSTS
+    # Markets we already hold a position in — never re-bet them (no averaging into an open
+    # position across cycles), so each market gets at most one entry.
+    held = held_tickers or set()
     # Engine seam: use the injected predictor, else fall back to the classifier bundle.
     predict = (
         predictor if predictor is not None else _classifier_predictor(bundle or {})
@@ -266,6 +275,15 @@ def generate_signals(
         for outcome, (ticker, yes_price) in outcome_markets.items():
             model_prob = probs.get(outcome)
             if model_prob is None:
+                continue
+            # Never add to a market we already hold: skip it entirely so a persistent edge
+            # can't grow the same position across cycles (the topping-up we want to avoid).
+            if ticker in held:
+                logger.info(
+                    "Skipping %s %s leg: already holding this market (no re-bet)",
+                    ticker,
+                    outcome,
+                )
                 continue
             # Drop legs the market is better-informed on (longshot floor, model/market
             # mismatch, draw/upset vs an overwhelming favorite) before edge/sizing.
@@ -572,6 +590,7 @@ async def run_live(*, dry_run: bool = True) -> list[Signal]:
         peak_bankroll_cents=state.peak_bankroll_cents,
         open_exposure_cents=state.exposure_cents,
         n_open=state.open_count,
+        held_tickers={p.ticker for p in state.positions},
         lineups_by_fixture=lineups_by_fixture,
         squad_ratings_by_team=squad_ratings_by_team,
     )
