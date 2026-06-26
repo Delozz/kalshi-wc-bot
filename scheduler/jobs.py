@@ -255,10 +255,17 @@ def main() -> None:
         run_cycle(dry_run_orders=not args.live_orders)
         return
 
+    # Persistent scheduler: thread the order mode into CONTEXT so job_generate_signals
+    # honours --live-orders. Without this it falls back to dry_run=True and an automated
+    # loop would never place real orders. Prod still requires KALSHI_ALLOW_PROD_ORDERS=1
+    # at the order-manager layer (L8), and the stop-loss still halts betting via the risk
+    # check inside signal generation — both hold even when running unattended.
+    CONTEXT["dry_run_orders"] = not args.live_orders
     scheduler = build_scheduler()
     logger.info(
-        "Starting scheduler (env=%s) with jobs: %s",
+        "Starting scheduler (env=%s, live_orders=%s) with jobs: %s",
         settings.kalshi_env,
+        args.live_orders,
         [job.id for job in scheduler.get_jobs()],
     )
     try:

@@ -6,6 +6,7 @@
 data/raw/
 data/processed/
 data/db.sqlite
+data/logs/
 model/artifacts/
 
 # Python

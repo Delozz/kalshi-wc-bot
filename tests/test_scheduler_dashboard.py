@@ -71,3 +71,38 @@ def test_run_cycle_invokes_all_jobs_in_order(monkeypatch) -> None:
         "_render_dashboard",
     ]
     assert jobs.CONTEXT["dry_run_orders"] is False
+
+
+class _FakeScheduler:
+    """Stand-in for the blocking scheduler: exits start() immediately."""
+
+    def get_jobs(self) -> list:
+        return []
+
+    def start(self) -> None:
+        raise SystemExit  # main() catches this and returns cleanly
+
+
+def _run_main(monkeypatch, argv: list[str]) -> bool:
+    """Run scheduler main() with a fake (non-blocking) scheduler; return the order mode."""
+    import sys
+
+    import scheduler.jobs as jobs
+
+    monkeypatch.setattr(sys, "argv", argv)
+    monkeypatch.setattr(jobs, "load_latest_artifact", lambda: None)
+    monkeypatch.setattr(jobs, "build_scheduler", lambda: _FakeScheduler())
+    jobs.CONTEXT["dry_run_orders"] = None  # ensure main() is what sets it
+    jobs.main()
+    return jobs.CONTEXT["dry_run_orders"]
+
+
+def test_persistent_scheduler_threads_live_orders(monkeypatch) -> None:
+    # The blocking scheduler must honour --live-orders. This is the money-critical gap:
+    # without threading the flag into CONTEXT, job_generate_signals defaults to dry_run.
+    assert _run_main(monkeypatch, ["jobs", "--live-orders"]) is False  # live = not dry
+
+
+def test_persistent_scheduler_defaults_to_dry_run(monkeypatch) -> None:
+    # No --live-orders: the automated loop must stay in dry-run (never place real orders).
+    assert _run_main(monkeypatch, ["jobs"]) is True
