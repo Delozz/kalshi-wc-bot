@@ -1,13 +1,16 @@
 # run_scheduler.ps1 — launcher for the Kalshi WC bot (Windows Task Scheduler).
 #
-# Runs ONE full cycle in LIVE-ORDER mode (refresh -> signals/place orders -> settle ->
-# bankroll) and exits. Windows Task Scheduler is the clock: trigger this daily at midnight
-# for one bet-placement pass per day. (To run the continuous in-process loop instead,
-# drop the --once flag below.)
+# Runs the CONTINUOUS in-process loop in LIVE-ORDER mode: APScheduler fires the jobs on
+# their cadences (signals every 3h, settle every 2h, sync/bankroll every 30m) until the
+# process is stopped. Registered to start at boot (-AtStartup) and auto-restart on crash,
+# so it comes back by itself after a reboot. The host must NOT sleep (a sleeping PC freezes
+# the loop) — keep sleep disabled. (For one pass per run instead, add --once below and use
+# a timed trigger.)
 #
 # Whether real money is at risk is still governed by .env: orders only hit prod when
 # KALSHI_ENV=prod AND KALSHI_ALLOW_PROD_ORDERS=1 (L8); otherwise they go to the demo
-# account. The stop-loss still halts betting via the risk check in signal generation.
+# account. The stop-loss still halts betting via the risk check in signal generation, and
+# the no-re-bet guard means a held market is never topped up across cycles.
 #
 # Append-logs to data/logs/scheduler.log so an unattended run leaves a trail.
 
@@ -26,5 +29,5 @@ $logDir = Join-Path $root "data\logs"
 New-Item -ItemType Directory -Force -Path $logDir | Out-Null
 $logFile = Join-Path $logDir "scheduler.log"
 
-"$(Get-Date -Format o)  starting daily cycle (once, live-orders)" | Out-File -FilePath $logFile -Append -Encoding utf8
-& $python -m scheduler.jobs --once --live-orders *>> $logFile
+"$(Get-Date -Format o)  starting persistent loop (live-orders)" | Out-File -FilePath $logFile -Append -Encoding utf8
+& $python -m scheduler.jobs --live-orders *>> $logFile
