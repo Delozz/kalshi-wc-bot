@@ -25,7 +25,15 @@ MAX_PRICE_MOVE: float = 0.03  # cancel a signal if the price drifts more than 3 
 # in signal_gen's candidate phase, before edge/sizing, so a doomed leg never claims a
 # ranking slot.
 MIN_MARKET_PRICE: float = 0.06  # below 6c the edge is longshot noise, not signal
-MAX_MODEL_MARKET_RATIO: float = 2.5  # model_prob may not exceed 2.5x the market price
+# A favorite leg may exceed the line by up to this ratio; draw/underdog legs get a tighter
+# bar (below). Every settled loss to date was a non-favorite leg the model overpriced
+# against a sharp line (Iran 0.46 vs 0.25, Paraguay-AUS 0.43 vs 0.25, Japan-over-Brazil
+# 0.40 vs 0.19) — ratios of 1.7–2.1x. The favorite legs weren't where we bled, so only the
+# non-favorite ratio is tightened; genuine favorite value bets stay untouched.
+MAX_MODEL_MARKET_RATIO: float = 2.5  # favorite leg: model may not exceed 2.5x the line
+MAX_MODEL_MARKET_RATIO_UNDERDOG: float = (
+    1.6  # draw/underdog leg: overprice-prone, tighter
+)
 POWERHOUSE_ELO_GAP: float = 200.0  # ELO gap above which draw/upset legs are untrusted
 # Lower bar applied only when the squad-strength prior agrees on the same favorite: a
 # moderate ELO edge plus a stronger squad is enough to distrust draw/upset legs (catches
@@ -151,7 +159,8 @@ def outcome_admissible(
     """Pre-edge signal-quality gate run per outcome before edge/sizing.
 
     Rejects legs the market is better-informed on: longshots below the price floor,
-    calibration outliers where the model dwarfs the line, and draw/upset legs against a
+    calibration outliers where the model dwarfs the line (a tighter ratio on the
+    overprice-prone draw/underdog legs than on the favorite), and draw/upset legs against a
     clear favorite. The favorite check has two tiers: an overwhelming pure-ELO gap, or a
     merely-strong ELO gap that the squad-strength prior independently confirms
     (``squad_confirms_favorite``) — the latter catches Portugal-type favorites whose ELO
@@ -160,7 +169,13 @@ def outcome_admissible(
     """
     if not price_floor_ok(market_price):
         return RiskDecision(False, "below_price_floor")
-    if not mismatch_ok(model_prob, market_price):
+    # Non-favorite legs (draw + underdog) are where the model systematically overprices a
+    # longshot against the sharp line, so they get the tighter ratio; the favorite leg keeps
+    # the looser one so legitimate favorite value isn't suppressed.
+    ratio = (
+        MAX_MODEL_MARKET_RATIO if bet_on_favorite else MAX_MODEL_MARKET_RATIO_UNDERDOG
+    )
+    if not mismatch_ok(model_prob, market_price, max_ratio=ratio):
         return RiskDecision(False, "model_market_mismatch")
     if not favorite_not_overwhelming(bet_on_favorite, favorite_elo_gap):
         return RiskDecision(False, "powerhouse_favorite")

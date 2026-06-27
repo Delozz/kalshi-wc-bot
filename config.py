@@ -56,6 +56,7 @@ class Settings:
     lineup_weight: float
     squad_weight: float
     dc_squad_prior_weight: float
+    confederation_weight: float
     db_path: Path
     log_level: str
 
@@ -100,7 +101,7 @@ def load_settings() -> Settings:
         # full H/D/A vector toward the stronger squad). 4.0 chosen from a weight-sweep
         # replay against real bets — a meaningful but calibration-safe tilt given how
         # compressed national-team ratings are. 0 disables the squad prior entirely.
-        squad_weight=_get_float("SQUAD_WEIGHT", 4.0),
+        squad_weight=_get_float("SQUAD_WEIGHT", 2.0),
         # Weight of the squad-strength signal blended into the Dixon-Coles ELO prior at fit
         # time (relative to ELO's unit-variance z-score). Lets a star-laden squad lift its
         # own attack/defense prior, refining data-sparse teams without disturbing data-rich
@@ -108,6 +109,12 @@ def load_settings() -> Settings:
         # squad ratings exist — so kept modest and demo-checked. 0 disables it. Only the DC
         # engine reads this; the classifier path is unaffected.
         dc_squad_prior_weight=_get_float("DC_SQUAD_PRIOR_WEIGHT", 0.5),
+        # Strength of the confederation-drift correction applied to the model's H/D/A vector
+        # and to the favorite/ELO-gap risk inputs. 1.0 = the full empirically-measured ELO
+        # offsets (the validated default); values in (0, 1) dial it back, 0 disables it. ELO
+        # alone over-rates AFC/CONCACAF and under-rates UEFA/CONMEBOL — see features/
+        # confederation.py. Engine-agnostic: applies to both the classifier and DC paths.
+        confederation_weight=_get_float("CONFEDERATION_WEIGHT", 1.0),
         db_path=Path(_get_str("DB_PATH", "data/db.sqlite")),
         log_level=_get_str("LOG_LEVEL", "INFO"),
     )
