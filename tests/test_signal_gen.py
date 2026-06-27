@@ -1,4 +1,10 @@
-"""Integration tests for signal generation (strategy/signal_gen.py) — all outcomes."""
+"""Integration tests for signal generation (strategy/signal_gen.py).
+
+These exercise the one-bet-per-fixture policy: of a match's mutually-exclusive H/D/A legs,
+only the single highest-edge admissible leg is bet (stacking correlated legs on one game is
+the mistake that lost on DR Congo/France/Portugal). Most tests pin an explicit ``threshold``
+so they stay decoupled from the operator-configured ``MIN_EDGE_THRESHOLD`` in ``.env``.
+"""
 
 from __future__ import annotations
 
@@ -35,35 +41,52 @@ def _fixture() -> Fixture:
     )
 
 
-def _markets(home: int, draw: int, away: int) -> list[dict]:
-    """Build synthetic market dicts using real API field names (cents args for readability)."""
+def _fixture2() -> Fixture:
+    return Fixture(
+        fixture_id=888,
+        kickoff_utc="2026-06-21T18:00:00+00:00",
+        status="NS",
+        home_team="France",
+        away_team="Spain",
+        round="Group H",
+    )
 
-    def _ask(cents: int) -> str:
-        return f"{cents / 100:.4f}"
 
+def _ask(cents: int) -> str:
+    return f"{cents / 100:.4f}"
+
+
+def _named_markets(
+    prefix: str, home_name: str, away_name: str, home: int, draw: int, away: int
+) -> list[dict]:
+    """Three per-outcome markets for one fixture, using real API field names (cents args)."""
     return [
         {
-            "ticker": "KXWC26-BRA-H",
-            "title": "Brazil vs Serbia",
-            "yes_sub_title": "Brazil",
+            "ticker": f"{prefix}-H",
+            "title": f"{home_name} vs {away_name}",
+            "yes_sub_title": home_name,
             "yes_ask_dollars": _ask(home),
             "open_interest_fp": "10000.00",
         },
         {
-            "ticker": "KXWC26-BRA-D",
-            "title": "Brazil vs Serbia",
+            "ticker": f"{prefix}-D",
+            "title": f"{home_name} vs {away_name}",
             "yes_sub_title": "Draw",
             "yes_ask_dollars": _ask(draw),
             "open_interest_fp": "10000.00",
         },
         {
-            "ticker": "KXWC26-BRA-A",
-            "title": "Brazil vs Serbia",
-            "yes_sub_title": "Serbia",
+            "ticker": f"{prefix}-A",
+            "title": f"{home_name} vs {away_name}",
+            "yes_sub_title": away_name,
             "yes_ask_dollars": _ask(away),
             "open_interest_fp": "10000.00",
         },
     ]
+
+
+def _markets(home: int, draw: int, away: int) -> list[dict]:
+    return _named_markets("KXWC26-BRA", "Brazil", "Serbia", home, draw, away)
 
 
 def _ratings(history: pd.DataFrame) -> dict[str, float]:
@@ -74,6 +97,10 @@ def _fixed_probs(_bundle, _features):
     return {"H": 0.6, "D": 0.3, "A": 0.2}
 
 
+def _leg(signal) -> str:
+    return signal["match_id"].split(":")[1]
+
+
 def test_resolver_maps_three_outcomes() -> None:
     resolved = signal_gen.default_outcome_resolver(_fixture(), _markets(50, 30, 20))
     assert resolved["H"] == ("KXWC26-BRA-H", 0.50)
@@ -81,7 +108,10 @@ def test_resolver_maps_three_outcomes() -> None:
     assert resolved["A"] == ("KXWC26-BRA-A", 0.20)
 
 
-def test_generates_a_signal_per_outcome_with_edge(monkeypatch) -> None:
+def test_one_bet_per_fixture_takes_highest_edge(monkeypatch) -> None:
+    # All three legs clear the edge threshold and the ratio guards, but only ONE bet is
+    # placed per match — the highest-edge leg. H: 0.60 vs 0.40 -> +0.20 wins the slot over
+    # D (+0.10) and A (+0.07).
     monkeypatch.setattr(signal_gen.predict_mod, "predict_outcome", _fixed_probs)
     history = _history()
     signals = signal_gen.generate_signals(
@@ -89,34 +119,49 @@ def test_generates_a_signal_per_outcome_with_edge(monkeypatch) -> None:
         history=history,
         ratings=_ratings(history),
         bundle={},
-        # Cheap on every outcome -> edge on all three, but kept above the 6c floor and
-        # within the 2.5x model/market band so the signal-quality guards are no-ops here.
-        markets=_markets(30, 15, 10),
+        markets=_markets(40, 20, 13),
         bankroll_cents=20000,
+        threshold=0.04,
     )
-    assert len(signals) == 3
-    assert {s["market_ticker"] for s in signals} == {
-        "KXWC26-BRA-H",
-        "KXWC26-BRA-D",
-        "KXWC26-BRA-A",
-    }
-    home = next(s for s in signals if s["market_ticker"] == "KXWC26-BRA-H")
-    assert home["match_id"].split(":")[1] == "H"  # outcome encoded in match_id
+    assert len(signals) == 1
+    assert _leg(signals[0]) == "H"
+    assert signals[0]["market_ticker"] == "KXWC26-BRA-H"
 
 
-def test_only_outcomes_with_edge_are_traded(monkeypatch) -> None:
+def test_only_outcome_with_edge_is_traded(monkeypatch) -> None:
+    # H has no edge (0.60 vs 0.65) and A is below threshold (0.20 vs 0.18 -> +0.02), so the
+    # draw is the only qualifying leg and therefore the bet — a non-favorite leg can win the
+    # single slot when the favorite offers no value.
     monkeypatch.setattr(signal_gen.predict_mod, "predict_outcome", _fixed_probs)
     history = _history()
-    # H: 0.60 vs 0.50 -> +0.10 (bet); D: 0.30 vs 0.40 -> -0.10 (skip); A: 0.20 vs 0.10 -> +0.10 (bet)
     signals = signal_gen.generate_signals(
         fixtures=[_fixture()],
         history=history,
         ratings=_ratings(history),
         bundle={},
-        markets=_markets(50, 40, 10),
+        markets=_markets(65, 20, 18),
         bankroll_cents=20000,
+        threshold=0.04,
     )
-    assert {s["market_ticker"] for s in signals} == {"KXWC26-BRA-H", "KXWC26-BRA-A"}
+    assert [_leg(s) for s in signals] == ["D"]
+
+
+def test_overpriced_underdog_leg_is_filtered(monkeypatch) -> None:
+    # A (0.20 vs 0.10) has the largest raw edge (+0.10) but a 2.0x model/market ratio, so the
+    # tightened underdog guard drops it before ranking. The favorite H (+0.05) is then the
+    # only admissible leg — proving A was excluded by the ratio, not merely out-ranked.
+    monkeypatch.setattr(signal_gen.predict_mod, "predict_outcome", _fixed_probs)
+    history = _history()
+    signals = signal_gen.generate_signals(
+        fixtures=[_fixture()],
+        history=history,
+        ratings=_ratings(history),
+        bundle={},
+        markets=_markets(55, 45, 10),
+        bankroll_cents=20000,
+        threshold=0.04,
+    )
+    assert [_leg(s) for s in signals] == ["H"]
 
 
 def test_no_signal_when_no_market_matches(monkeypatch) -> None:
@@ -131,36 +176,38 @@ def test_no_signal_when_no_market_matches(monkeypatch) -> None:
             {"ticker": "X", "title": "France vs Spain", "yes_ask_dollars": "0.05"}
         ],
         bankroll_cents=20000,
+        threshold=0.04,
     )
     assert signals == []
 
 
-def test_scarce_slot_goes_to_highest_edge_not_first_processed(monkeypatch) -> None:
-    # Only one position slot is free (n_open=4, cap=5). The away leg has the larger edge
-    # (0.15) but is the LAST outcome processed; home is smaller (0.10) but processed first.
-    # The pre-fix chronological code would have filled the slot with home; ranking by edge
-    # first must instead award it to away.
+def test_scarce_slot_goes_to_highest_edge_fixture(monkeypatch) -> None:
+    # Only one position slot is free (n_open=4, cap=5). Two fixtures each offer a favorite
+    # leg, but France's edge (+0.20) beats Brazil's (+0.15). The single slot must go to the
+    # higher-edge fixture's bet, regardless of fixture processing order.
     monkeypatch.setattr(signal_gen.predict_mod, "predict_outcome", _fixed_probs)
     history = _history()
+    markets = _markets(45, 20, 13) + _named_markets(
+        "KXWC26-FRA", "France", "Spain", 40, 20, 13
+    )
     signals = signal_gen.generate_signals(
-        fixtures=[_fixture()],
+        fixtures=[_fixture(), _fixture2()],
         history=history,
         ratings=_ratings(history),
         bundle={},
-        # H: 0.60 vs 0.50 -> +0.10; D: 0.30 vs 0.40 -> -0.10 (skip); A: 0.20 vs 0.09 -> +0.11.
-        # Away leg stays above the 6c floor (9c) so it remains the highest-edge candidate.
-        markets=_markets(50, 40, 9),
+        markets=markets,
         bankroll_cents=20000,
         n_open=4,
+        threshold=0.04,
     )
     assert len(signals) == 1
-    assert signals[0]["market_ticker"] == "KXWC26-BRA-A"
+    assert signals[0]["market_ticker"] == "KXWC26-FRA-H"
 
 
 def test_injected_predictor_overrides_classifier() -> None:
-    # The engine seam: a custom predictor supplies the base probs instead of the bundle,
-    # and the rest of the pipeline (edge, sizing) runs on them unchanged. This is the path
-    # run_live uses to swap in the Dixon-Coles engine.
+    # The engine seam: a custom predictor supplies the base probs instead of the bundle, and
+    # the rest of the pipeline (edge, sizing, one-per-fixture cap) runs on them. This is the
+    # path run_live uses to swap in the Dixon-Coles engine.
     history = _history()
     used = {}
 
@@ -173,17 +220,16 @@ def test_injected_predictor_overrides_classifier() -> None:
         history=history,
         ratings=_ratings(history),
         predictor=predictor,
-        markets=_markets(30, 15, 10),
+        markets=_markets(30, 20, 13),
         bankroll_cents=20000,
+        threshold=0.04,
     )
     assert used.get("called") is True
-    assert {_leg(s) for s in signals} == {"H", "D", "A"}
+    assert [_leg(s) for s in signals] == ["H"]
 
 
 def test_dc_predictor_drives_signals() -> None:
-    # A fitted Dixon-Coles model plugged in as the predictor produces signals end to end.
-    import pandas as pd
-
+    # A fitted Dixon-Coles model plugged in as the predictor produces a signal end to end.
     from model import dixon_coles
 
     scorelines = pd.DataFrame(
@@ -207,16 +253,17 @@ def test_dc_predictor_drives_signals() -> None:
         predictor=signal_gen._dc_predictor(model),
         markets=_markets(30, 25, 25),
         bankroll_cents=20000,
+        threshold=0.04,
     )
-    # Brazil is the stronger side in the fitted model, so the home leg must be among signals.
-    assert "H" in {_leg(s) for s in signals}
+    # Brazil is the stronger side in the fitted model, so the single bet must be the home leg.
+    assert [_leg(s) for s in signals] == ["H"]
 
 
 def test_powerhouse_blocks_draw_and_upset_legs(monkeypatch) -> None:
-    # France (2000 ELO) vs Iraq (1600 ELO): a 400-point gap. Even though the model gives
-    # the draw and the Iraq upset enough probability to clear the edge threshold at these
-    # prices, both legs must be filtered as powerhouse mismatches — only the favorite
-    # (France) leg may survive. This is the Iraq-over-France bet we never want again.
+    # France (2000 ELO) vs Iraq (1600 ELO): a 400-point gap. The draw and Iraq-upset legs are
+    # filtered as powerhouse mismatches, so only the favorite (France) leg can survive — and
+    # under the one-per-fixture cap that single France leg is the bet. The Iraq-over-France
+    # bet we never want again.
     monkeypatch.setattr(
         signal_gen.predict_mod,
         "predict_outcome",
@@ -230,29 +277,7 @@ def test_powerhouse_blocks_draw_and_upset_legs(monkeypatch) -> None:
         away_team="Iraq",
         round="Group A",
     )
-    markets = [
-        {
-            "ticker": "KXWC26-FRA-H",
-            "title": "France vs Iraq",
-            "yes_sub_title": "France",
-            "yes_ask_dollars": "0.5000",
-            "open_interest_fp": "10000.00",
-        },
-        {
-            "ticker": "KXWC26-FRA-D",
-            "title": "France vs Iraq",
-            "yes_sub_title": "Draw",
-            "yes_ask_dollars": "0.0800",
-            "open_interest_fp": "10000.00",
-        },
-        {
-            "ticker": "KXWC26-FRA-A",
-            "title": "France vs Iraq",
-            "yes_sub_title": "Iraq",
-            "yes_ask_dollars": "0.0800",
-            "open_interest_fp": "10000.00",
-        },
-    ]
+    markets = _named_markets("KXWC26-FRA", "France", "Iraq", 50, 8, 8)
     signals = signal_gen.generate_signals(
         fixtures=[fixture],
         history=_history(),
@@ -260,24 +285,25 @@ def test_powerhouse_blocks_draw_and_upset_legs(monkeypatch) -> None:
         bundle={},
         markets=markets,
         bankroll_cents=20000,
+        threshold=0.04,
     )
-    assert {s["match_id"].split(":")[1] for s in signals} == {"H"}
+    assert [_leg(s) for s in signals] == ["H"]
 
 
-def _leg(signal) -> str:
-    return signal["match_id"].split(":")[1]
-
-
-def test_squad_prior_suppresses_bets_against_stronger_squad(monkeypatch) -> None:
-    # Without a squad prior, all three legs clear the edge at these prices. Feeding a squad
-    # prior where the home side (Brazil) is much stronger than the away side (Serbia) must
-    # tilt probability onto the favourite: the draw and the upset legs lose enough mass to
-    # fall below the market and stop being bet, while the favourite leg survives. This is
-    # the Portugal/Norway fix — we no longer bet against a clearly stronger squad.
-    monkeypatch.setattr(signal_gen.predict_mod, "predict_outcome", _fixed_probs)
+def test_squad_prior_flips_bet_from_draw_to_favorite(monkeypatch) -> None:
+    # Without a squad prior the draw is the highest-edge admissible leg and gets the single
+    # slot. Feeding a prior where the home side (Brazil) is much stronger tilts probability
+    # onto the favourite: the draw's edge collapses and the bet flips to the home leg. The
+    # bot never bets the draw against a clearly stronger squad. (The tilt mechanic itself is
+    # unit-tested in test_squad.py.)
+    monkeypatch.setattr(
+        signal_gen.predict_mod,
+        "predict_outcome",
+        lambda _b, _f: {"H": 0.45, "D": 0.35, "A": 0.20},
+    )
     history = _history()
     ratings = _ratings(history)
-    markets = _markets(40, 20, 15)
+    markets = _markets(34, 23, 15)
 
     base = signal_gen.generate_signals(
         fixtures=[_fixture()],
@@ -286,8 +312,9 @@ def test_squad_prior_suppresses_bets_against_stronger_squad(monkeypatch) -> None
         bundle={},
         markets=markets,
         bankroll_cents=20000,
+        threshold=0.04,
     )
-    assert {_leg(s) for s in base} == {"H", "D", "A"}
+    assert [_leg(s) for s in base] == ["D"]
 
     tilted = signal_gen.generate_signals(
         fixtures=[_fixture()],
@@ -296,20 +323,19 @@ def test_squad_prior_suppresses_bets_against_stronger_squad(monkeypatch) -> None
         bundle={},
         markets=markets,
         bankroll_cents=20000,
+        threshold=0.04,
         squad_ratings_by_team={
             "Brazil": {1: 8.0, 2: 8.0},
             "Serbia": {1: 6.0, 2: 6.0},
         },
     )
-    legs = {_leg(s) for s in tilted}
-    assert "H" in legs
-    assert "D" not in legs and "A" not in legs
+    assert [_leg(s) for s in tilted] == ["H"]
 
 
-def test_held_market_is_not_rebet(monkeypatch) -> None:
-    # The no-re-bet guard: a market already in the portfolio is skipped in the candidate
-    # phase, so a persistent edge can't grow the same position across cycles (the Iran
-    # 9 -> 16 topping-up). The other two legs still generate normally.
+def test_held_fixture_blocks_all_its_legs(monkeypatch) -> None:
+    # One bet per fixture across cycles: holding any leg of a match (here the H leg) bars its
+    # sibling D/A legs too, so the bot never accumulates two correlated legs on one game even
+    # when a persistent edge re-appears next cycle. The other legs would otherwise qualify.
     monkeypatch.setattr(signal_gen.predict_mod, "predict_outcome", _fixed_probs)
     history = _history()
     signals = signal_gen.generate_signals(
@@ -317,16 +343,17 @@ def test_held_market_is_not_rebet(monkeypatch) -> None:
         history=history,
         ratings=_ratings(history),
         bundle={},
-        markets=_markets(30, 15, 10),
+        markets=_markets(40, 20, 13),
         bankroll_cents=20000,
         held_tickers={"KXWC26-BRA-H"},
+        threshold=0.04,
     )
-    legs = {s["market_ticker"] for s in signals}
-    assert "KXWC26-BRA-H" not in legs  # already held -> skipped, never re-bet
-    assert legs == {"KXWC26-BRA-D", "KXWC26-BRA-A"}
+    assert signals == []
 
 
 def test_risk_blocks_on_stop_loss(monkeypatch) -> None:
+    # Candidates clear the edge/ratio guards, but a 75% drawdown from peak trips the
+    # stop-loss in the ranking phase and nothing is bet.
     monkeypatch.setattr(signal_gen.predict_mod, "predict_outcome", _fixed_probs)
     history = _history()
     signals = signal_gen.generate_signals(
@@ -334,8 +361,9 @@ def test_risk_blocks_on_stop_loss(monkeypatch) -> None:
         history=history,
         ratings=_ratings(history),
         bundle={},
-        markets=_markets(5, 5, 5),
+        markets=_markets(40, 20, 13),
         bankroll_cents=5000,  # down 75% from peak -> stop-loss
         peak_bankroll_cents=20000,
+        threshold=0.04,
     )
     assert signals == []

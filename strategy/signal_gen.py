@@ -84,6 +84,17 @@ def _host_for(
     return None
 
 
+def _event_prefix(ticker: str) -> str:
+    """The event identity shared by a fixture's H/D/A legs (ticker minus the outcome suffix).
+
+    KXWCGAME structures one event per match with three per-outcome tickers that differ only
+    in their final segment, e.g. ``KXWCGAME-26JUN27CODUZB-TIE`` / ``-UZB`` / ``-COD`` all
+    share ``KXWCGAME-26JUN27CODUZB``. Stripping the last ``-`` segment yields that shared
+    key, which is how we enforce one bet per match (and detect a fixture we already hold).
+    """
+    return ticker.rsplit("-", 1)[0]
+
+
 def _open_interest(markets: list[dict[str, Any]], ticker: str) -> float:
     for market in markets:
         if str(market.get("ticker", "")) == ticker:
@@ -198,9 +209,15 @@ def generate_signals(
     on whatever base probabilities the engine returns.
 
     ``held_tickers`` (optional) is the set of market tickers we already hold an open position
-    in; any candidate on one of them is skipped, so the bot never averages into an existing
-    position across cycles (one entry per market). ``run_live`` passes the live portfolio's
-    tickers; the position/exposure caps still apply on top."""
+    in. Any candidate on one of them is skipped (no averaging into a position), and — because
+    only one bet is taken per fixture — holding any leg of a match also blocks its sibling
+    legs across cycles, so the bot never ends up with two correlated legs on one game.
+    ``run_live`` passes the live portfolio's tickers; the position/exposure caps still apply
+    on top.
+
+    Only the single highest-edge leg of any fixture is bet: the H/D/A legs of a 3-way market
+    are mutually exclusive, so stacking them concentrates the stake on one match and the
+    draw+underdog pair is one "favorite doesn't win" bet placed twice."""
     hosts_by_year = hosts_by_year or WC_HOSTS
     # Markets we already hold a position in — never re-bet them (no averaging into an open
     # position across cycles), so each market gets at most one entry.
@@ -334,8 +351,23 @@ def generate_signals(
     # later matches once max_positions filled).
     candidates.sort(key=lambda c: c[0]["edge"], reverse=True)
 
+    # One bet per fixture. Every YES leg on a 3-way match is mutually exclusive — at most
+    # one can win — so stacking legs concentrates the whole stake on a single game, and the
+    # draw+underdog pair is really one "favorite doesn't win" bet placed twice (both lost
+    # together on DR Congo, France, Portugal, …). Because candidates are edge-sorted, taking
+    # only the first leg per event keeps the single highest-edge expression of each match.
+    # Seed with the events we already hold so a sibling leg can't be added across cycles.
+    claimed_events: set[str] = {_event_prefix(t) for t in held}
+
     signals: list[Signal] = []
     for signal, ticker in candidates:
+        event = _event_prefix(ticker)
+        if event in claimed_events:
+            logger.info(
+                "Signal %s skipped: already betting this fixture (one bet per match)",
+                ticker,
+            )
+            continue
         decision = risk.check_all(
             bankroll=bankroll,
             peak_bankroll=peak,
@@ -349,6 +381,7 @@ def generate_signals(
             continue
 
         signals.append(signal)
+        claimed_events.add(event)
         exposure += signal["bet_size_cents"] / 100.0
         n_open += 1
 
@@ -545,6 +578,12 @@ async def run_live(*, dry_run: bool = True) -> list[Signal]:
             prior_scale=dixon_coles.DEFAULT_PRIOR_SCALE,
             secondary=squad_strength_by_team or None,
             secondary_weight=settings.dc_squad_prior_weight,
+            # Drop teams with too little history from the goals fit: with only a handful of
+            # matches the MLE attack/defense is noise (and over-rates minnows who ran up
+            # scores on regional weaklings). Every real WC side has 350+ internationals, so
+            # 12 only sheds unofficial/representative teams (Yorkshire, Kabylia, …) that
+            # pollute the league-average baseline. Dropped teams fall back to the ELO prior.
+            min_matches=12,
         )
         predictor = _dc_predictor(dc_model)
         logger.info(

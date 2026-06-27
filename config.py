@@ -100,7 +100,7 @@ def load_settings() -> Settings:
         # full H/D/A vector toward the stronger squad). 4.0 chosen from a weight-sweep
         # replay against real bets — a meaningful but calibration-safe tilt given how
         # compressed national-team ratings are. 0 disables the squad prior entirely.
-        squad_weight=_get_float("SQUAD_WEIGHT", 4.0),
+        squad_weight=_get_float("SQUAD_WEIGHT", 2.0),
         # Weight of the squad-strength signal blended into the Dixon-Coles ELO prior at fit
         # time (relative to ELO's unit-variance z-score). Lets a star-laden squad lift its
         # own attack/defense prior, refining data-sparse teams without disturbing data-rich
