@@ -76,6 +76,45 @@ def apply_squad_prior(
     return {outcome: value / total for outcome, value in scaled.items()}
 
 
+def apply_confederation_prior(
+    probs: dict[str, float],
+    elo_delta: float,
+    *,
+    weight: float | None = None,
+) -> dict[str, float]:
+    """Tilt the H/D/A vector for inter-confederation ELO drift, then renormalize.
+
+    ``elo_delta`` is the home-minus-away confederation ELO offset (signed points, from
+    ``features.confederation.elo_delta``). It is applied the way ELO itself treats a rating
+    gap: the home/away win-odds ratio is multiplied by ``10 ** (weight * elo_delta / 400)``,
+    realized by scaling the home leg by ``10 ** (w*d/800)`` and the away leg by the inverse
+    while the draw is held, then renormalizing. So ``P_H/P_A`` shifts by exactly the ELO
+    factor and the result stays a valid distribution. This corrects the model *output*
+    (engine-agnostic) rather than the rating prior, which the Dixon-Coles MLE was shown to
+    override for data-rich teams.
+
+    With ``elo_delta == 0`` (same confederation, or either team unmapped) or ``weight == 0``
+    this is the identity — the zero-impact fallback. ``weight`` defaults to
+    ``settings.confederation_weight``; only the H and A legs are scaled, any other key is
+    carried through unchanged.
+    """
+    w = settings.confederation_weight if weight is None else weight
+    if w == 0.0 or elo_delta == 0.0 or not probs:
+        return dict(probs)
+
+    root = 10.0 ** (w * elo_delta / 800.0)  # sqrt of the 10**(d/400) odds factor
+    scaled = {
+        outcome: (
+            prob * root if outcome == "H" else prob / root if outcome == "A" else prob
+        )
+        for outcome, prob in probs.items()
+    }
+    total = sum(scaled.values())
+    if total <= 0.0:
+        return dict(probs)
+    return {outcome: value / total for outcome, value in scaled.items()}
+
+
 def build_signal(
     *,
     match_id: str,

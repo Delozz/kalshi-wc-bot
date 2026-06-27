@@ -22,7 +22,7 @@ from typing import Any
 import pandas as pd
 
 from config import settings
-from features import elo, lineup, squad
+from features import confederation, elo, lineup, squad
 from ingestion.api_football import Fixture
 from model import dixon_coles
 from model import predict as predict_mod
@@ -256,6 +256,15 @@ def generate_signals(
         )
         probs = predict(fixture, features)
 
+        # Confederation-drift correction (engine-agnostic, before any finer prior): raw ELO
+        # over-rates AFC/CONCACAF and under-rates UEFA/CONMEBOL because each pool is only
+        # loosely anchored to the others, which manufactured the Japan-over-Brazil / Iran /
+        # Australia overprices. Tilt the {H,D,A} vector by the home-minus-away confederation
+        # ELO offset. Zero for intra-confederation games (offsets cancel) or unmapped teams.
+        conf_elo_delta = confederation.elo_delta(fixture.home_team, fixture.away_team)
+        if conf_elo_delta:
+            probs = edge_mod.apply_confederation_prior(probs, conf_elo_delta)
+
         # Always-on squad-strength prior: tilt the {H,D,A} vector toward the stronger
         # squad. Squad ratings are available at any horizon (unlike announced lineups), so
         # this shapes advance bets — the Portugal/Ronaldo, Norway/Haaland case where we bet
@@ -271,9 +280,17 @@ def generate_signals(
 
         # Pre-edge signal-quality gate inputs: the ELO favorite and the size of its edge.
         # Draw/underdog legs against an overwhelming favorite are where our model is least
-        # trustworthy and the Kalshi line sharpest (the Iraq-over-France problem).
-        home_elo = features["home_elo_pre"]
-        away_elo = features["away_elo_pre"]
+        # trustworthy and the Kalshi line sharpest (the Iraq-over-France problem). Fold the
+        # confederation offset into the ELOs here too, so the favorite and the powerhouse-gap
+        # reflect true cross-confederation strength (e.g. Paraguay, not Australia, is the
+        # favorite once the offsets are applied) and the ratio/powerhouse guards key off it.
+        conf_w = settings.confederation_weight
+        home_elo = features["home_elo_pre"] + conf_w * confederation.offset_for(
+            fixture.home_team
+        )
+        away_elo = features["away_elo_pre"] + conf_w * confederation.offset_for(
+            fixture.away_team
+        )
         favorite = "H" if home_elo >= away_elo else "A"
         elo_gap = abs(home_elo - away_elo)
         # The squad prior independently confirms the ELO favorite when its sign agrees,

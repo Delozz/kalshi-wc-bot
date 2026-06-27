@@ -94,7 +94,9 @@ def _ratings(history: pd.DataFrame) -> dict[str, float]:
 
 
 def _fixed_probs(_bundle, _features):
-    return {"H": 0.6, "D": 0.3, "A": 0.2}
+    # A normalized H/D/A distribution (real engines always sum to 1; the confederation and
+    # squad priors renormalize, so an un-normalized fixture would shift under them).
+    return {"H": 0.55, "D": 0.27, "A": 0.18}
 
 
 def _leg(signal) -> str:
@@ -110,8 +112,8 @@ def test_resolver_maps_three_outcomes() -> None:
 
 def test_one_bet_per_fixture_takes_highest_edge(monkeypatch) -> None:
     # All three legs clear the edge threshold and the ratio guards, but only ONE bet is
-    # placed per match — the highest-edge leg. H: 0.60 vs 0.40 -> +0.20 wins the slot over
-    # D (+0.10) and A (+0.07).
+    # placed per match — the highest-edge leg. H: 0.55 vs 0.40 -> +0.15 wins the slot over
+    # D (+0.09) and A (+0.06).
     monkeypatch.setattr(signal_gen.predict_mod, "predict_outcome", _fixed_probs)
     history = _history()
     signals = signal_gen.generate_signals(
@@ -119,7 +121,7 @@ def test_one_bet_per_fixture_takes_highest_edge(monkeypatch) -> None:
         history=history,
         ratings=_ratings(history),
         bundle={},
-        markets=_markets(40, 20, 13),
+        markets=_markets(40, 18, 12),
         bankroll_cents=20000,
         threshold=0.04,
     )
@@ -129,7 +131,7 @@ def test_one_bet_per_fixture_takes_highest_edge(monkeypatch) -> None:
 
 
 def test_only_outcome_with_edge_is_traded(monkeypatch) -> None:
-    # H has no edge (0.60 vs 0.65) and A is below threshold (0.20 vs 0.18 -> +0.02), so the
+    # H has no edge (0.55 vs 0.60) and A is below threshold (0.18 vs 0.16 -> +0.02), so the
     # draw is the only qualifying leg and therefore the bet — a non-favorite leg can win the
     # single slot when the favorite offers no value.
     monkeypatch.setattr(signal_gen.predict_mod, "predict_outcome", _fixed_probs)
@@ -139,7 +141,7 @@ def test_only_outcome_with_edge_is_traded(monkeypatch) -> None:
         history=history,
         ratings=_ratings(history),
         bundle={},
-        markets=_markets(65, 20, 18),
+        markets=_markets(60, 20, 16),
         bankroll_cents=20000,
         threshold=0.04,
     )
@@ -147,7 +149,7 @@ def test_only_outcome_with_edge_is_traded(monkeypatch) -> None:
 
 
 def test_overpriced_underdog_leg_is_filtered(monkeypatch) -> None:
-    # A (0.20 vs 0.10) has the largest raw edge (+0.10) but a 2.0x model/market ratio, so the
+    # A (0.18 vs 0.10) has the largest raw edge (+0.08) but a 1.8x model/market ratio, so the
     # tightened underdog guard drops it before ranking. The favorite H (+0.05) is then the
     # only admissible leg — proving A was excluded by the ratio, not merely out-ranked.
     monkeypatch.setattr(signal_gen.predict_mod, "predict_outcome", _fixed_probs)
@@ -157,7 +159,7 @@ def test_overpriced_underdog_leg_is_filtered(monkeypatch) -> None:
         history=history,
         ratings=_ratings(history),
         bundle={},
-        markets=_markets(55, 45, 10),
+        markets=_markets(50, 40, 10),
         bankroll_cents=20000,
         threshold=0.04,
     )
@@ -213,7 +215,7 @@ def test_injected_predictor_overrides_classifier() -> None:
 
     def predictor(_fixture, _features):
         used["called"] = True
-        return {"H": 0.6, "D": 0.3, "A": 0.2}
+        return {"H": 0.55, "D": 0.27, "A": 0.18}
 
     signals = signal_gen.generate_signals(
         fixtures=[_fixture()],
@@ -349,6 +351,39 @@ def test_held_fixture_blocks_all_its_legs(monkeypatch) -> None:
         threshold=0.04,
     )
     assert signals == []
+
+
+def test_confederation_correction_suppresses_cross_confed_upset(monkeypatch) -> None:
+    # Brazil (CONMEBOL) vs Japan (AFC). The raw model gives Japan 0.318, which at the 0.24
+    # line would clear the edge (+0.078) and be bet — the exact Japan-over-Brazil mistake.
+    # The confederation tilt (+143 ELO for Brazil) pulls Japan to ~0.19, killing that edge,
+    # and lifts Brazil's home leg so the single bet flips to the favorite instead.
+    monkeypatch.setattr(
+        signal_gen.predict_mod,
+        "predict_outcome",
+        lambda _b, _f: {"H": 0.385, "D": 0.298, "A": 0.318},
+    )
+    fixture = Fixture(
+        fixture_id=7,
+        kickoff_utc="2026-06-29T18:00:00+00:00",
+        status="NS",
+        home_team="Brazil",
+        away_team="Japan",
+        round="Group C",
+    )
+    markets = _named_markets("KXWC26-BRJ", "Brazil", "Japan", 45, 30, 24)
+    signals = signal_gen.generate_signals(
+        fixtures=[fixture],
+        history=_history(),
+        ratings={"Brazil": 1940.0, "Japan": 1884.0},
+        bundle={},
+        markets=markets,
+        bankroll_cents=20000,
+        threshold=0.04,
+    )
+    legs = {_leg(s) for s in signals}
+    assert "A" not in legs  # Japan upset suppressed by the confederation correction
+    assert legs == {"H"}  # the favorite (Brazil) is the single bet
 
 
 def test_risk_blocks_on_stop_loss(monkeypatch) -> None:
