@@ -157,6 +157,23 @@ def update_order_status(
     conn.commit()
 
 
+def ordered_tickers(conn: sqlite3.Connection) -> set[str]:
+    """Every market ticker we have ever placed a real order on, any status.
+
+    The live no-re-bet guard keys off the Kalshi *positions* endpoint, which only sees
+    currently-open contracts: once a position settles or is manually liquidated it vanishes
+    from there, so the guard alone would happily re-enter a market we already traded and
+    deliberately exited. This persistent set closes that gap — a ticker that has any order
+    row (filled, settled, cancelled, timeout) is never bet again. Each WC market ticker is
+    unique to one match-outcome and never recurs, so including closed markets is harmless.
+    """
+    rows = conn.execute(
+        "SELECT DISTINCT s.market_ticker FROM orders o "
+        "JOIN signals s ON o.signal_id = s.id"
+    ).fetchall()
+    return {str(row["market_ticker"]) for row in rows if row["market_ticker"]}
+
+
 def settle_order(
     conn: sqlite3.Connection, order_id: str, *, settled_at: object, pnl_cents: int
 ) -> None:

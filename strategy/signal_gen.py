@@ -620,17 +620,22 @@ async def run_live(*, dry_run: bool = True) -> list[Signal]:
     state = await portfolio.sync_from_kalshi(
         fallback_bankroll_cents=settings.initial_bankroll_cents
     )
+    # Markets we already hold live on Kalshi — the primary no-re-bet set.
+    held_tickers: set[str] = {p.ticker for p in state.positions}
     # Lift peak to the real high-water mark from the ledger so the stop-loss measures a
-    # genuine drawdown (sync alone sets peak == current balance). L9: never crash on this.
+    # genuine drawdown (sync alone sets peak == current balance), and union in every ticker
+    # we have ever ordered so a settled/liquidated market can't be re-entered (the Kalshi
+    # positions endpoint forgets closed positions). L9: never crash on this.
     try:
-        from data.db import connect, real_peak_bankroll
+        from data.db import connect, ordered_tickers, real_peak_bankroll
 
         with connect() as conn:
             portfolio.ratchet_peak(state, real_peak_bankroll(conn))
+            held_tickers |= ordered_tickers(conn)
     except (
         Exception
     ) as exc:  # noqa: BLE001 — peak read must not block signal generation
-        logger.warning("Could not read historical peak: %s", exc)
+        logger.warning("Could not read historical peak/orders: %s", exc)
 
     lineups_by_fixture = (
         await _fetch_lineups(fixtures) if fixtures_have_real_ids else {}
@@ -646,7 +651,7 @@ async def run_live(*, dry_run: bool = True) -> list[Signal]:
         peak_bankroll_cents=state.peak_bankroll_cents,
         open_exposure_cents=state.exposure_cents,
         n_open=state.open_count,
-        held_tickers={p.ticker for p in state.positions},
+        held_tickers=held_tickers,
         lineups_by_fixture=lineups_by_fixture,
         squad_ratings_by_team=squad_ratings_by_team,
     )

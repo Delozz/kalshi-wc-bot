@@ -92,6 +92,9 @@ def _run_main(monkeypatch, argv: list[str]) -> bool:
     monkeypatch.setattr(sys, "argv", argv)
     monkeypatch.setattr(jobs, "load_latest_artifact", lambda: None)
     monkeypatch.setattr(jobs, "build_scheduler", lambda: _FakeScheduler())
+    # These tests exercise order-mode threading, not the single-instance lock; stub it as
+    # acquired so a real bind (and its process-lifetime socket) doesn't leak across tests.
+    monkeypatch.setattr(jobs, "acquire_single_instance_lock", lambda: True)
     jobs.CONTEXT["dry_run_orders"] = None  # ensure main() is what sets it
     jobs.main()
     return jobs.CONTEXT["dry_run_orders"]
@@ -106,3 +109,36 @@ def test_persistent_scheduler_threads_live_orders(monkeypatch) -> None:
 def test_persistent_scheduler_defaults_to_dry_run(monkeypatch) -> None:
     # No --live-orders: the automated loop must stay in dry-run (never place real orders).
     assert _run_main(monkeypatch, ["jobs"]) is True
+
+
+def test_single_instance_lock_blocks_second_holder(monkeypatch) -> None:
+    # The first bind acquires the lock; a second must be refused (two daemons = double
+    # orders). Patch the port so the test never collides with a real running scheduler.
+    import scheduler.jobs as jobs
+
+    monkeypatch.setattr(jobs, "_SINGLE_INSTANCE_PORT", 49519)
+    monkeypatch.setattr(jobs, "_instance_lock", None)
+    first = jobs.acquire_single_instance_lock()
+    try:
+        assert first is True
+        assert jobs.acquire_single_instance_lock() is False  # port already held
+    finally:
+        if jobs._instance_lock is not None:
+            jobs._instance_lock.close()
+            jobs._instance_lock = None
+
+
+def test_second_scheduler_instance_exits(monkeypatch) -> None:
+    # main() must refuse to start a persistent loop when the lock is already held.
+    import sys
+
+    import pytest
+
+    import scheduler.jobs as jobs
+
+    monkeypatch.setattr(sys, "argv", ["jobs", "--live-orders"])
+    monkeypatch.setattr(jobs, "load_latest_artifact", lambda: None)
+    monkeypatch.setattr(jobs, "build_scheduler", lambda: _FakeScheduler())
+    monkeypatch.setattr(jobs, "acquire_single_instance_lock", lambda: False)
+    with pytest.raises(SystemExit):
+        jobs.main()

@@ -55,6 +55,28 @@ def test_compute_pnl_win_and_loss() -> None:
     assert settlement.compute_pnl_cents(60, 10, won=False) == -10 * 60
 
 
+def test_ordered_tickers_includes_every_status(conn) -> None:
+    # The no-re-bet guard must remember a market across settle/cancel, not just while the
+    # Kalshi position is live. A cancelled (liquidated) order's ticker must still be returned.
+    sid_filled = db.log_signal(conn, _signal("1:H:Brazil_Serbia"))
+    db.log_order(conn, _order(sid_filled, order_id="ord_filled"))
+
+    cancelled = _signal("2:A:France_Spain")
+    cancelled["market_ticker"] = "KXWC26-ESP-A"
+    sid_cancelled = db.log_signal(conn, cancelled)
+    order = _order(sid_cancelled, order_id="ord_cancelled")
+    order["status"] = "cancelled"
+    db.log_order(conn, order)
+
+    assert db.ordered_tickers(conn) == {"KXWC26-BRA-H", "KXWC26-ESP-A"}
+
+
+def test_ordered_tickers_empty_when_no_orders(conn) -> None:
+    # A signal with no order row must not appear — only markets we actually traded count.
+    db.log_signal(conn, _signal("3:H:Brazil_Serbia"))
+    assert db.ordered_tickers(conn) == set()
+
+
 def test_settle_fixture_winning_outcome(conn) -> None:
     db.record_bankroll(conn, 20000, "deposit")
     signal_id = db.log_signal(conn, _signal("999:H:Brazil_Serbia"))

@@ -15,6 +15,7 @@ import argparse
 import asyncio
 import logging
 import pickle
+import socket
 from pathlib import Path
 from typing import Any
 
@@ -29,6 +30,31 @@ logger = logging.getLogger(__name__)
 
 # Shared mutable context passed to jobs (portfolio state, loaded model artifact).
 CONTEXT: dict[str, Any] = {"artifact": None, "portfolio": None}
+
+# Fixed loopback port used purely as a single-instance lock (not a real server). Bind
+# succeeds for exactly one process; a second persistent scheduler fails to bind and exits
+# instead of double-placing orders. Kept module-global so the bound socket lives for the
+# whole process and the OS releases it automatically on exit/crash (no stale lock file).
+_SINGLE_INSTANCE_PORT = 49517
+_instance_lock: socket.socket | None = None
+
+
+def acquire_single_instance_lock() -> bool:
+    """Bind the loopback lock port; return False if another scheduler already holds it.
+
+    Prevents the failure mode where a stale/orphaned scheduler keeps running old code and
+    a freshly-launched one places orders alongside it — two daemons trading the same
+    account at once. Using a socket (not a PID file) means a crash frees the lock instantly.
+    """
+    global _instance_lock
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        sock.bind(("127.0.0.1", _SINGLE_INSTANCE_PORT))
+    except OSError:
+        sock.close()
+        return False
+    _instance_lock = sock  # hold the reference for the process lifetime
+    return True
 
 
 def load_latest_artifact() -> dict[str, Any] | None:
@@ -254,6 +280,18 @@ def main() -> None:
         )
         run_cycle(dry_run_orders=not args.live_orders)
         return
+
+    # Single-instance guard: refuse to start a second persistent loop. Two schedulers on
+    # one account double-place orders (a stale orphaned daemon running old code alongside a
+    # freshly-launched one is exactly how mis-priced re-bets slipped through). The lock is a
+    # loopback socket the OS frees automatically on exit, so a crash never wedges it.
+    if not acquire_single_instance_lock():
+        logger.error(
+            "Another scheduler instance is already running (lock port %d held); refusing "
+            "to start a second loop. Stop the existing process first.",
+            _SINGLE_INSTANCE_PORT,
+        )
+        raise SystemExit(1)
 
     # Persistent scheduler: thread the order mode into CONTEXT so job_generate_signals
     # honours --live-orders. Without this it falls back to dry_run=True and an automated
