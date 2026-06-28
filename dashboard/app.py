@@ -189,10 +189,16 @@ def render(
 def main() -> None:
     import asyncio
 
+    from data.db import connect, init_db, real_peak_bankroll
+    from execution.portfolio import ratchet_peak
+
     configure_logging()
     state = asyncio.run(
         sync_from_kalshi(fallback_bankroll_cents=settings.initial_bankroll_cents)
     )
+    init_db()
+    with connect() as conn:
+        ratchet_peak(state, real_peak_bankroll(conn))
     render(
         state,
         _recent_signals(),
