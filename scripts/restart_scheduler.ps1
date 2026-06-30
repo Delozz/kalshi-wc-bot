@@ -17,7 +17,8 @@ $ErrorActionPreference = "Stop"
 if ($PSScriptRoot) {
     $Bot = Split-Path -Parent $PSScriptRoot
 } else {
-    $Bot = "C:\Users\mario\OneDrive\Documents\World Cup Kalshi Bot"
+    Write-Error "PSScriptRoot is empty. Run this script via: powershell.exe -File path\to\scripts\restart_scheduler.ps1"
+    exit 1
 }
 $TaskName = "KalshiWCBotLoop"
 $StderrLog = Join-Path $Bot "data\logs\scheduler_stderr.log"
