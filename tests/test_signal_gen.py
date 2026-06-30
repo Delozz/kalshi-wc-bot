@@ -184,7 +184,7 @@ def test_no_signal_when_no_market_matches(monkeypatch) -> None:
 
 
 def test_scarce_slot_goes_to_highest_edge_fixture(monkeypatch) -> None:
-    # Only one position slot is free (n_open=4, cap=5). Two fixtures each offer a favorite
+    # Only one position slot is free (n_open=9, cap=10). Two fixtures each offer a favorite
     # leg, but France's edge (+0.20) beats Brazil's (+0.15). The single slot must go to the
     # higher-edge fixture's bet, regardless of fixture processing order.
     monkeypatch.setattr(signal_gen.predict_mod, "predict_outcome", _fixed_probs)
@@ -199,7 +199,7 @@ def test_scarce_slot_goes_to_highest_edge_fixture(monkeypatch) -> None:
         bundle={},
         markets=markets,
         bankroll_cents=20000,
-        n_open=4,
+        n_open=9,
         threshold=0.04,
     )
     assert len(signals) == 1
@@ -387,8 +387,9 @@ def test_confederation_correction_suppresses_cross_confed_upset(monkeypatch) -> 
 
 
 def test_risk_blocks_on_stop_loss(monkeypatch) -> None:
-    # Candidates clear the edge/ratio guards, but a 75% drawdown from peak trips the
-    # stop-loss in the ranking phase and nothing is bet.
+    # Candidates clear the edge/ratio guards, but a 95% drawdown from peak trips the
+    # stop-loss in the ranking phase and nothing is bet. (95% clears the operator-set
+    # 90% stop-loss threshold with margin, so the test stays valid regardless of tuning.)
     monkeypatch.setattr(signal_gen.predict_mod, "predict_outcome", _fixed_probs)
     history = _history()
     signals = signal_gen.generate_signals(
@@ -397,7 +398,7 @@ def test_risk_blocks_on_stop_loss(monkeypatch) -> None:
         ratings=_ratings(history),
         bundle={},
         markets=_markets(40, 20, 13),
-        bankroll_cents=5000,  # down 75% from peak -> stop-loss
+        bankroll_cents=1000,  # down 95% from peak -> stop-loss
         peak_bankroll_cents=20000,
         threshold=0.04,
     )
