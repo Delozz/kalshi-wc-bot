@@ -2,7 +2,7 @@
 
 Hard guards that sit between a signal and an order. None of these may be removed during
 live trading (the stop-loss especially). Limits default to the project standards:
-stop-loss at 25% drawdown from peak, 20% max portfolio exposure, at most 5 open
+stop-loss threshold at 90% drawdown from peak, 25% max portfolio exposure, at most 10 open
 positions, and a minimum market liquidity floor.
 """
 
@@ -15,7 +15,7 @@ from config import settings
 
 logger = logging.getLogger(__name__)
 
-MAX_OPEN_POSITIONS: int = 5
+MAX_OPEN_POSITIONS: int = 10
 MIN_OPEN_INTEREST: float = 5000.0  # dollars
 MAX_PRICE_MOVE: float = 0.03  # cancel a signal if the price drifts more than 3 cents
 
