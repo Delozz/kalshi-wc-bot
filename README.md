@@ -166,6 +166,9 @@ The bot can run unattended via a Windows Scheduled Task that restarts automatica
 # Check task health
 & ".\scripts\status.ps1"
 
+# Full restart after a config or code change (elevated PowerShell required)
+& ".\scripts\restart_scheduler.ps1"
+
 # Stop the loop (keeps task registered for next time)
 Stop-ScheduledTask -TaskName "KalshiWCBotLoop"
 
@@ -176,7 +179,9 @@ Disable-ScheduledTask -TaskName "KalshiWCBotLoop"
 Enable-ScheduledTask -TaskName "KalshiWCBotLoop"
 ```
 
-Logs are written to `data/logs/scheduler.log`. Sleep/hibernate must be disabled (`powercfg /change standby-timeout-ac 0`) — a sleeping PC freezes the loop. The PC must be powered on at tournament time; the task recovers automatically at next boot via the `AtStartup` trigger.
+Logs are written to `data/logs/scheduler.log` and `data/logs/scheduler_stderr.log`. Sleep/hibernate must be disabled (`powercfg /change standby-timeout-ac 0`) — a sleeping PC freezes the loop. The PC must be powered on at tournament time; the task recovers automatically at next boot via the `AtStartup` trigger.
+
+> **Restart note:** `Stop-ScheduledTask` kills only the launcher process, not the Python loop it spawned. Always use `scripts/restart_scheduler.ps1` (elevated) when you need a clean restart — it kills the orphaned Python process before starting fresh, ensuring the new instance picks up the latest `.env` and code.
 
 ---
 
@@ -202,7 +207,7 @@ Logs are written to `data/logs/scheduler.log`. Sleep/hibernate must be disabled 
 | Max bet size | 5% of bankroll | Hard cap per position |
 | Max portfolio exposure | 20% of bankroll | Sum of all open position sizes |
 | Stop-loss | 25% drawdown from peak | Halts all betting if breached |
-| Max open positions | 5 | Concurrent open position limit |
+| Max open positions | 10 | Concurrent open position limit |
 
 ---
 
@@ -229,5 +234,5 @@ python -m backtest.engine --tournament 2018
 - **APScheduler** — cron-style job scheduling during the live tournament
 - **SQLite** — local persistence for signals, orders, and bankroll log
 - **rich** — CLI dashboard
-- **pytest** — 91 tests, all network-free
+- **pytest** — 157 tests, all network-free
 - **ruff + black** — linting and formatting
