@@ -24,6 +24,7 @@ import pandas as pd
 from config import settings
 from features import confederation, elo, lineup, squad
 from ingestion.api_football import Fixture
+from model import calibration as calib_mod
 from model import dixon_coles
 from model import predict as predict_mod
 from model.dataset import WC_HOSTS, build_live_features
@@ -58,10 +59,13 @@ def _dc_predictor(model: dixon_coles.DixonColesModel) -> Predictor:
 
     WC venues are neutral, so home advantage stays off — consistent with the feature path,
     which also builds features with ``neutral=True``. The feature dict is ignored (DC reads
-    team strength from its own fitted attack/defense ratings)."""
+    team strength from its own fitted attack/defense ratings). Output passes through the
+    temperature calibration layer (L5) — identity at the default ``DC_TEMPERATURE=1.0``,
+    per the 2018 out-of-sample fit (see ``config.py``)."""
 
     def predict(fixture: Fixture, _features: dict[str, float]) -> dict[str, float]:
-        return model.predict_hda(fixture.home_team, fixture.away_team, neutral=True)
+        hda = model.predict_hda(fixture.home_team, fixture.away_team, neutral=True)
+        return calib_mod.temper_probs(hda, settings.dc_temperature)
 
     return predict
 

@@ -117,9 +117,23 @@ def evaluate_split(year: int, train: pd.DataFrame, val: pd.DataFrame) -> Tournam
     )
 
 
+@dataclass(frozen=True)
+class GoalsEval:
+    """Out-of-sample Dixon-Coles evaluation, carrying the raw predictions.
+
+    ``probs``/``labels`` are exposed so a calibration layer (temperature scaling) can be
+    fit on these genuinely out-of-sample predictions — never on training rows.
+    """
+
+    result: eval_mod.EvalResult
+    reliability: list[tuple[float, float, int]]
+    probs: np.ndarray
+    labels: np.ndarray
+
+
 def evaluate_goals_model(
     year: int, train: pd.DataFrame, val: pd.DataFrame, *, prior_scale: float = 0.0
-) -> tuple[eval_mod.EvalResult, list[tuple[float, float, int]]]:
+) -> GoalsEval:
     """Fit Dixon-Coles on ``train`` scorelines and score H/D/A on ``val``, causally.
 
     Same causal contract as :func:`evaluate_split` — the training frame is routed through
@@ -163,7 +177,7 @@ def evaluate_goals_model(
     y_val = val["label"].to_numpy(dtype=int)
     result = eval_mod.evaluate(y_val, probs)
     reliability = eval_mod.reliability_curve(y_val, probs)
-    return result, reliability
+    return GoalsEval(result=result, reliability=reliability, probs=probs, labels=y_val)
 
 
 def run_probability_backtest(
@@ -229,6 +243,15 @@ def main() -> None:
         default=0.0,
         help="Strength of the ELO prior for --model dc (0 = plain DC; try 0.1-0.4).",
     )
+    parser.add_argument(
+        "--fit-dc-temperature",
+        action="store_true",
+        help=(
+            "After a --model dc run, fit the temperature exponent tau on the tournament's "
+            "out-of-sample predictions (L5) and report the tempered Brier/log-loss. The "
+            "fitted tau is what DC_TEMPERATURE should carry in live config."
+        ),
+    )
     args = parser.parse_args()
     configure_logging()
 
@@ -248,9 +271,10 @@ def main() -> None:
     train = train[train["date"] >= pd.Timestamp(TRAIN_START)]
 
     if args.model == "dc":
-        result, reliability = evaluate_goals_model(
+        goals_eval = evaluate_goals_model(
             args.year, train, val, prior_scale=args.dc_prior_scale
         )
+        result, reliability = goals_eval.result, goals_eval.reliability
         logger.info(
             "=== %d World Cup out-of-sample (Dixon-Coles, prior_scale=%.2f, "
             "%d train / %d eval) ===",
@@ -260,6 +284,16 @@ def main() -> None:
             result.n,
         )
         _log_eval("Dixon-Coles", result)
+        if args.fit_dc_temperature:
+            tau = calib_mod.fit_temperature(goals_eval.probs, goals_eval.labels)
+            tempered = calib_mod.temper_matrix(goals_eval.probs, tau)
+            tempered_result = eval_mod.evaluate(goals_eval.labels, tempered)
+            _log_eval(f"DC tempered t={tau:.3f}", tempered_result)
+            logger.info(
+                "Set DC_TEMPERATURE=%.3f in .env if the tempered Brier improves; "
+                "keep 1.0 (identity) otherwise.",
+                tau,
+            )
     else:
         evaluation = evaluate_split(args.year, train, val)
         logger.info(
