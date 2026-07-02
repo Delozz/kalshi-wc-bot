@@ -50,7 +50,7 @@ if (Test-Path $venvPy) {
 }
 "$(Get-Date -Format o)  python=$python" | Out-File -FilePath $logFile -Append -Encoding utf8
 
-"$(Get-Date -Format o)  starting persistent loop (DRY-RUN — no orders placed)" | Out-File -FilePath $logFile -Append -Encoding utf8
+"$(Get-Date -Format o)  starting persistent loop (DRY-RUN - no orders placed)" | Out-File -FilePath $logFile -Append -Encoding utf8
 
 # Start-Process redirects at the OS level — captures output even if Python dies before
 # writing a single byte (unlike the PowerShell pipeline which requires bytes to flow).
