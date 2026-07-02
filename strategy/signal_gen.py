@@ -95,6 +95,48 @@ def _event_prefix(ticker: str) -> str:
     return ticker.rsplit("-", 1)[0]
 
 
+def _book_hda(
+    fixture: Fixture,
+    book_probs_by_pair: dict[frozenset[str], dict[str, float]] | None,
+) -> dict[str, float] | None:
+    """This fixture's sportsbook consensus as an {H, D, A} vector, or ``None``.
+
+    ``consensus_book_probs`` keys by team-name pair (orientation-free, since sources
+    disagree on who is "home" at a neutral venue); here it is oriented onto the fixture's
+    own home/away designation.
+    """
+    if not book_probs_by_pair:
+        return None
+    entry = book_probs_by_pair.get(frozenset((fixture.home_team, fixture.away_team)))
+    if not entry:
+        return None
+    home = entry.get(fixture.home_team)
+    draw = entry.get("Draw")
+    away = entry.get(fixture.away_team)
+    if home is None or draw is None or away is None:
+        return None
+    return {"H": home, "D": draw, "A": away}
+
+
+def _kalshi_anchor(
+    outcome_markets: dict[str, tuple[str, float]],
+) -> dict[str, float] | None:
+    """Normalized Kalshi YES prices as an anchor when no sportsbook covers the fixture.
+
+    Normalizing strips the vig (prices on a 3-way market typically sum a little above 1),
+    giving the market's own implied distribution. Requires all three legs — normalizing a
+    partial market would fabricate probability mass for the quoted legs. ``None`` (no
+    anchor, raw model) in that degenerate case.
+    """
+    if set(outcome_markets) != {"H", "D", "A"}:
+        return None
+    prices = {outcome: price for outcome, (_t, price) in outcome_markets.items()}
+    total = sum(prices.values())
+    if total <= 0.0:
+        return None
+    return {outcome: price / total for outcome, price in prices.items()}
+
+
 def _open_interest(markets: list[dict[str, Any]], ticker: str) -> float:
     for market in markets:
         if str(market.get("ticker", "")) == ticker:
@@ -188,6 +230,7 @@ def generate_signals(
     ) = None,
     squad_ratings_by_team: dict[str, dict[int, float]] | None = None,
     predictor: Predictor | None = None,
+    book_probs_by_pair: dict[frozenset[str], dict[str, float]] | None = None,
 ) -> list[Signal]:
     """Produce sized, risk-checked signals across all outcomes for the given fixtures.
 
@@ -207,6 +250,15 @@ def generate_signals(
     callable. Defaults to the classifier ``bundle``; ``run_live`` injects the Dixon-Coles
     engine instead when ``MODEL_ENGINE=dc``. The squad nudge and risk filters run identically
     on whatever base probabilities the engine returns.
+
+    ``book_probs_by_pair`` (optional) is the sportsbook no-vig consensus from
+    ``odds_api.consensus_book_probs``, keyed by ``frozenset({home, away})``. Every fixture's
+    probability vector is shrunk toward a market anchor before the edge check (model share
+    ``settings.model_blend_weight``): the book consensus when it covers the fixture, else
+    the fixture's own normalized Kalshi prices. This is the market-anchoring introduced
+    after 18 settled live bets showed the line beating the raw model (Brier 0.077 vs
+    0.144) — an edge must now come from book-vs-Kalshi divergence or survive a 70% shrink,
+    not from raw model disagreement alone.
 
     ``held_tickers`` (optional) is the set of market tickers we already hold an open position
     in. Any candidate on one of them is skipped (no averaging into a position), and — because
@@ -277,6 +329,39 @@ def generate_signals(
             )
             if squad_delta:
                 probs = edge_mod.apply_squad_prior(probs, squad_delta)
+
+        # Market anchor — the last word before edge/sizing. Shrink the (tilted) model
+        # vector toward the sportsbook no-vig consensus, or toward the fixture's own
+        # normalized Kalshi prices when no book covers it (Devon-ratified fallback:
+        # uncovered fixtures defer to the line rather than trade the raw model).
+        anchor = _book_hda(fixture, book_probs_by_pair)
+        anchor_src = "book"
+        if anchor is None:
+            anchor = _kalshi_anchor(outcome_markets)
+            anchor_src = "kalshi"
+        if anchor is not None:
+            raw_probs = probs
+            probs = edge_mod.blend_with_book(probs, anchor)
+            logger.info(
+                "Anchored %s vs %s to %s (model share %.2f): "
+                "H %.3f->%.3f  D %.3f->%.3f  A %.3f->%.3f",
+                fixture.home_team,
+                fixture.away_team,
+                anchor_src,
+                settings.model_blend_weight,
+                raw_probs.get("H", 0.0),
+                probs.get("H", 0.0),
+                raw_probs.get("D", 0.0),
+                probs.get("D", 0.0),
+                raw_probs.get("A", 0.0),
+                probs.get("A", 0.0),
+            )
+        else:
+            logger.warning(
+                "No market anchor for %s vs %s (partial market) — raw model probs",
+                fixture.home_team,
+                fixture.away_team,
+            )
 
         # Pre-edge signal-quality gate inputs: the ELO favorite and the size of its edge.
         # Draw/underdog legs against an overwhelming favorite are where our model is least
@@ -547,7 +632,7 @@ async def _fetch_squad_ratings(
 async def run_live(*, dry_run: bool = True) -> list[Signal]:
     """Fetch live inputs, generate signals, and route them (dry-run by default, L8)."""
     from execution import order_manager, portfolio
-    from ingestion import api_football, international_results, kalshi
+    from ingestion import api_football, international_results, kalshi, odds_api
 
     raw_fixtures = await api_football.fetch_fixtures()
     fixtures = api_football.upcoming(api_football.parse_fixtures(raw_fixtures))
@@ -576,6 +661,14 @@ async def run_live(*, dry_run: bool = True) -> list[Signal]:
     # lineup nudge can't reach. Empty (zero-impact) on the Kalshi-fallback path (no ids).
     # Fetched here (before the DC fit) so its top-11 strength can also seed the goals model.
     squad_ratings_by_team = await _fetch_squad_ratings(raw_fixtures, fixtures)
+
+    # Sportsbook no-vig consensus for the market anchor (daily-cached, L4 — one Odds API
+    # request against the 25/day cap). Failure degrades to the Kalshi-price anchor (L9).
+    book_probs_by_pair: dict[frozenset[str], dict[str, float]] = {}
+    try:
+        book_probs_by_pair = odds_api.consensus_book_probs(await odds_api.fetch_odds())
+    except Exception as exc:  # noqa: BLE001 — L9: odds failure must not crash the run
+        logger.warning("Book consensus unavailable, Kalshi-anchor fallback: %s", exc)
 
     # Build the live probability engine (config-selectable; DC is the validated default,
     # MODEL_ENGINE=classifier rolls back instantly). DC is fit once per run on the full
@@ -654,6 +747,7 @@ async def run_live(*, dry_run: bool = True) -> list[Signal]:
         held_tickers=held_tickers,
         lineups_by_fixture=lineups_by_fixture,
         squad_ratings_by_team=squad_ratings_by_team,
+        book_probs_by_pair=book_probs_by_pair,
     )
     for signal in signals:
         result = await order_manager.place_order(signal, dry_run=dry_run)

@@ -115,6 +115,41 @@ def apply_confederation_prior(
     return {outcome: value / total for outcome, value in scaled.items()}
 
 
+def blend_with_book(
+    probs: dict[str, float],
+    anchor: dict[str, float] | None,
+    *,
+    weight: float | None = None,
+) -> dict[str, float]:
+    """Shrink the model's H/D/A vector toward a market anchor, renormalized.
+
+    ``p_final = w * p_model + (1 - w) * p_anchor`` per outcome, where ``w`` is the
+    *model's* share (``settings.model_blend_weight``, default 0.30 — the anchor carries
+    70%). The anchor is the sportsbook no-vig consensus when available, else normalized
+    Kalshi prices. This is the core anti-phantom-edge control: 18 settled live bets showed
+    the line's Brier (0.077) beating the raw model's (0.144), so an "edge" that exists only
+    in the raw model is far likelier mis-calibration than value. After blending, an edge
+    survives only where the anchor itself diverges from the Kalshi price (book-vs-Kalshi
+    mispricing) and/or the model's residual disagreement is large.
+
+    Identity (returns ``probs`` unchanged) when the anchor is missing, doesn't cover every
+    outcome the model prices, or ``weight >= 1.0`` — the zero-impact fallback.
+    """
+    w = settings.model_blend_weight if weight is None else weight
+    if not probs or not anchor or w >= 1.0:
+        return dict(probs)
+    if any(outcome not in anchor for outcome in probs):
+        return dict(probs)
+    blended = {
+        outcome: w * prob + (1.0 - w) * float(anchor[outcome])
+        for outcome, prob in probs.items()
+    }
+    total = sum(blended.values())
+    if total <= 0.0:
+        return dict(probs)
+    return {outcome: value / total for outcome, value in blended.items()}
+
+
 def build_signal(
     *,
     match_id: str,
