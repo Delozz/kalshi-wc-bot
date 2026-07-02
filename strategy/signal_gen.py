@@ -235,9 +235,9 @@ def generate_signals(
     """Produce sized, risk-checked signals across all outcomes for the given fixtures.
 
     ``lineups_by_fixture`` (optional) maps a fixture id to its ``(home_lineup,
-    away_lineup)`` API-Football payloads. When present, the resulting home-minus-away
-    strength delta nudges the model probability per outcome (positive favours home, so
-    it is negated for the away leg and zeroed for the draw). Absent or unannounced
+    away_lineup)`` API-Football payloads. When present, the home-minus-away strength
+    delta tilts the full {H, D, A} vector toward the stronger XI (renormalized, same
+    mechanic as the squad prior), before the market anchor. Absent or unannounced
     lineups leave a 0.0 delta — identical to the pre-lineup behaviour.
 
     ``squad_ratings_by_team`` (optional) maps a canonical team name to its squad's season
@@ -330,6 +330,16 @@ def generate_signals(
             if squad_delta:
                 probs = edge_mod.apply_squad_prior(probs, squad_delta)
 
+        # Announced-lineup tilt (pre-match window only; 0.0 delta otherwise). Same vector
+        # mechanic as the squad prior — the old per-leg nudge scaled one leg in isolation,
+        # which could leave H+D+A summing above 1: edge fabricated by the adjustment.
+        if lineups_by_fixture:
+            pair = lineups_by_fixture.get(fixture.fixture_id)
+            if pair is not None:
+                lineup_delta = lineup.lineup_strength_delta(pair[0], pair[1])
+                if lineup_delta:
+                    probs = edge_mod.apply_lineup_prior(probs, lineup_delta)
+
         # Market anchor — the last word before edge/sizing. Shrink the (tilted) model
         # vector toward the sportsbook no-vig consensus, or toward the fixture's own
         # normalized Kalshi prices when no book covers it (Devon-ratified fallback:
@@ -384,13 +394,6 @@ def generate_signals(
             squad_delta < 0 and favorite == "A"
         )
 
-        # Home-minus-away starting-XI strength (0.0 when lineups aren't announced).
-        raw_lineup_delta = 0.0
-        if lineups_by_fixture:
-            pair = lineups_by_fixture.get(fixture.fixture_id)
-            if pair is not None:
-                raw_lineup_delta = lineup.lineup_strength_delta(pair[0], pair[1])
-
         for outcome, (ticker, yes_price) in outcome_markets.items():
             model_prob = probs.get(outcome)
             if model_prob is None:
@@ -424,13 +427,6 @@ def generate_signals(
                     elo_gap,
                 )
                 continue
-            # Sign the delta for this leg: +home, -away, 0 for the (ambiguous) draw.
-            if outcome == "H":
-                signed_delta = raw_lineup_delta
-            elif outcome == "A":
-                signed_delta = -raw_lineup_delta
-            else:
-                signed_delta = 0.0
             signal = edge_mod.build_signal(
                 match_id=(
                     f"{fixture.fixture_id}:{outcome}:"
@@ -441,7 +437,6 @@ def generate_signals(
                 kalshi_yes_price=yes_price,
                 bankroll=bankroll,
                 threshold=threshold,
-                lineup_delta=signed_delta,
             )
             if signal is None:
                 continue

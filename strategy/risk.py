@@ -1,9 +1,10 @@
 """Risk controls (strategy/risk.py).
 
 Hard guards that sit between a signal and an order. None of these may be removed during
-live trading (the stop-loss especially). Limits default to the project standards:
-stop-loss threshold at 90% drawdown from peak, 25% max portfolio exposure, at most 10 open
-positions, and a minimum market liquidity floor.
+live trading (the stop-loss especially). The stop-loss drawdown threshold and portfolio
+exposure cap are env-driven (``STOP_LOSS_THRESHOLD``, ``MAX_PORTFOLIO_EXPOSURE`` — see
+``.env``/CLAUDE.md for the operator-ratified values); position count and the market
+liquidity floor default to the module constants below.
 """
 
 from __future__ import annotations
