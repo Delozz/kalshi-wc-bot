@@ -125,7 +125,7 @@ kalshi-wc-bot/
 - Minimum edge threshold: 4% — never lower this without backtesting justification
 - Maximum bet size: 5% of bankroll — hard cap, not a suggestion
 - Maximum portfolio exposure: 20% — sum of all open position sizes
-- Stop-loss: halt all betting if bankroll drops 25% from peak
+- Stop-loss: halt all betting if bankroll drops 75% from peak (`STOP_LOSS_THRESHOLD=0.75`) — Devon's explicit, accepted-risk choice (2026-07-01); do not "fix" it back to 25% without his say-so
 
 ## Hosting Constraints
 
