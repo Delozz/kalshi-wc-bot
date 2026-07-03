@@ -110,6 +110,62 @@ def test_resolver_maps_three_outcomes() -> None:
     assert resolved["A"] == ("KXWC26-BRA-A", 0.20)
 
 
+def test_union_fixtures_adds_kalshi_only_pairs() -> None:
+    # API-Football lags on knockout pairings; a pair Kalshi already trades must join the
+    # fixture list (Portugal-Spain case), while known pairs never duplicate — even when
+    # the Kalshi-derived copy reverses home/away (neutral-venue orientation differs).
+    primary = [_fixture()]  # Brazil vs Serbia
+    reversed_copy = Fixture(
+        fixture_id=111111,
+        kickoff_utc="2026-06-20T18:00:00+00:00",
+        status="NS",
+        home_team="Serbia",
+        away_team="Brazil",
+        round=None,
+    )
+    kalshi_only = Fixture(
+        fixture_id=222222,
+        kickoff_utc="2026-07-06T18:00:00+00:00",
+        status="NS",
+        home_team="Portugal",
+        away_team="Spain",
+        round=None,
+    )
+    merged = signal_gen._union_fixtures(primary, [reversed_copy, kalshi_only])
+    assert [f.home_team for f in merged] == ["Brazil", "Portugal"]
+    # Empty primary falls back to the Kalshi-derived list wholesale.
+    assert signal_gen._union_fixtures([], [kalshi_only]) == [kalshi_only]
+
+
+def test_resolver_matches_knockout_decorated_subtitles() -> None:
+    # Knockout markets decorate sub-titles ("Reg Time: USA") and USA is an aliased name;
+    # both must still resolve — this exact combination hid the USA-Belgium market.
+    fixture = Fixture(
+        fixture_id=7,
+        kickoff_utc="2026-07-06T18:00:00+00:00",
+        status="NS",
+        home_team="United States",
+        away_team="Belgium",
+        round="Round of 16",
+    )
+    markets = [
+        {
+            "ticker": f"KXWCGAME-26JUL06USABEL-{suffix}",
+            "yes_sub_title": sub,
+            "yes_ask_dollars": price,
+        }
+        for suffix, sub, price in (
+            ("USA", "Reg Time: USA", "0.40"),
+            ("TIE", "Reg Time: Draw", "0.30"),
+            ("BEL", "Reg Time: Belgium", "0.35"),
+        )
+    ]
+    resolved = signal_gen.default_outcome_resolver(fixture, markets)
+    assert resolved["H"] == ("KXWCGAME-26JUL06USABEL-USA", 0.40)
+    assert resolved["D"] == ("KXWCGAME-26JUL06USABEL-TIE", 0.30)
+    assert resolved["A"] == ("KXWCGAME-26JUL06USABEL-BEL", 0.35)
+
+
 def test_one_bet_per_fixture_takes_highest_edge(monkeypatch) -> None:
     # All three legs clear the edge threshold and the ratio guards, but only ONE bet is
     # placed per match — the highest-edge leg. H: 0.55 vs 0.40 -> +0.15 wins the slot over

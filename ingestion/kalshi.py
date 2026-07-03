@@ -163,20 +163,30 @@ async def get_markets(
     shared ticker prefix (e.g. ``KXWCGAME-26JUN27CODUZB``).  Full team names live in
     ``yes_sub_title``; ``parse_wc_fixtures`` derives upcoming fixtures from this data.
     """
-    params: dict[str, str] = {"series_ticker": series_ticker}
+    # Paginate to exhaustion: /markets caps each page (default 100), which silently
+    # dropped every market past page one — a whole slate of fixtures (USA-Belgium on
+    # 2026-07-03) never reached the resolver. The board's "no Kalshi market" rows are
+    # the tripwire for this class of gap.
+    params: dict[str, str] = {"series_ticker": series_ticker, "limit": "1000"}
     if status is not None:
         params["status"] = status
+    markets: list[dict[str, Any]] = []
+    cursor: str | None = None
     async with httpx.AsyncClient() as client:
-        data = await _get(
-            client,
-            "/markets",
-            params,
-            use_public=True,
-        )
-    if not data:
-        return []
-    _cache(f"kalshi_markets_{series_ticker}.json", data)
-    return data.get("markets", [])
+        for _page in range(20):  # hard stop far beyond any WC series size
+            page_params = dict(params)
+            if cursor:
+                page_params["cursor"] = cursor
+            data = await _get(client, "/markets", page_params, use_public=True)
+            if not data:
+                break
+            markets.extend(data.get("markets", []))
+            cursor = data.get("cursor") or None
+            if not cursor:
+                break
+    if markets:
+        _cache(f"kalshi_markets_{series_ticker}.json", {"markets": markets})
+    return markets
 
 
 async def get_orderbook(ticker: str) -> dict[str, Any] | None:
@@ -216,7 +226,7 @@ def parse_wc_fixtures(markets: list[dict[str, Any]]) -> list[Any]:
     """
     from datetime import datetime, timedelta, timezone
 
-    from features.teams import canonical
+    from features.teams import canonical_market_team
     from ingestion.api_football import Fixture  # local import avoids circular dep
 
     groups: dict[str, list[dict[str, Any]]] = {}
@@ -256,13 +266,15 @@ def parse_wc_fixtures(markets: list[dict[str, Any]]) -> list[Any]:
         away_name: str | None = None
         for m in group:
             suffix = m.get("ticker", "").rsplit("-", 1)[-1].upper()
-            sub = str(m.get("yes_sub_title", ""))
+            # Strip knockout decorations ("Reg Time: USA") before alias lookup — the
+            # bare-string canonical() missed every aliased team on decorated markets.
+            sub = canonical_market_team(str(m.get("yes_sub_title", "")))
             if not sub or sub.lower() in ("tie", "draw"):
                 continue
             if suffix == home_abbrev:
-                home_name = canonical(sub)
+                home_name = sub
             elif suffix == away_abbrev:
-                away_name = canonical(sub)
+                away_name = sub
 
         if not home_name or not away_name:
             continue

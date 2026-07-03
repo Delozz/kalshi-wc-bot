@@ -21,6 +21,7 @@ _ALIASES: dict[str, str] = {
     "côte d'ivoire": "Ivory Coast",
     "cote d'ivoire": "Ivory Coast",
     "cabo verde": "Cape Verde",
+    "cape verde islands": "Cape Verde",
     "türkiye": "Turkey",
     "turkiye": "Turkey",
     "congo dr": "DR Congo",
@@ -38,3 +39,18 @@ def canonical(name: str) -> str:
         return name
     trimmed = name.strip()
     return _ALIASES.get(trimmed.lower(), trimmed)
+
+
+def canonical_market_team(sub_title: str) -> str:
+    """Canonical team name from a Kalshi ``yes_sub_title``, stripping decorations.
+
+    Knockout-round KXWCGAME markets decorate the team as ``"Reg Time: USA"`` — the alias
+    map keys on the bare name, so canonicalizing the full string silently failed for every
+    aliased team (USA never became "United States" and the whole fixture went unmatched).
+    Take the segment after the last colon, then canonicalize. Undecorated sub-titles
+    (group-stage ``"USA"``, ``"Draw"``) pass through unchanged.
+    """
+    if not sub_title:
+        return sub_title
+    tail = sub_title.rsplit(":", 1)[-1]
+    return canonical(tail)

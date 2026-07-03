@@ -21,6 +21,33 @@ def test_implied_yes_price_from_ask() -> None:
     assert kalshi.implied_yes_price({"yes_bid": 60}) is None
 
 
+def test_get_markets_paginates_past_first_page(monkeypatch, tmp_path) -> None:
+    # /markets caps each page; a single-request fetch silently dropped every market past
+    # page one (USA-Belgium never reached the resolver). The client must follow the
+    # cursor until exhausted.
+    import asyncio
+
+    pages = [
+        {"markets": [{"ticker": f"M{i}"} for i in range(3)], "cursor": "next-1"},
+        {"markets": [{"ticker": f"M{i}"} for i in range(3, 5)], "cursor": "next-2"},
+        {"markets": [{"ticker": "M5"}], "cursor": ""},
+    ]
+    seen_cursors: list[str | None] = []
+
+    async def fake_get(_client, endpoint, params=None, **_kw):
+        assert endpoint == "/markets"
+        seen_cursors.append((params or {}).get("cursor"))
+        return pages[len(seen_cursors) - 1]
+
+    monkeypatch.setattr(kalshi, "_get", fake_get)
+    monkeypatch.setattr(kalshi, "_cache", lambda *_a, **_k: None)
+
+    markets = asyncio.run(kalshi.get_markets())
+    assert [m["ticker"] for m in markets] == ["M0", "M1", "M2", "M3", "M4", "M5"]
+    # First call has no cursor; subsequent calls thread the previous page's cursor.
+    assert seen_cursors == [None, "next-1", "next-2"]
+
+
 def test_novig_from_h2h_sums_to_one() -> None:
     outcomes = [
         {"name": "France", "price": 1.95},

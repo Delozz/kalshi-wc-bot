@@ -176,6 +176,30 @@ def _leg_row(
     )
 
 
+def _union_fixtures(
+    primary: list[Fixture], kalshi_derived: list[Fixture]
+) -> list[Fixture]:
+    """Primary (API-Football) fixtures plus any team-pair only Kalshi knows about.
+
+    API-Football lags on knockout pairings — on 2026-07-03 Kalshi was already trading
+    JUL06 Portugal-Spain days before API-Football listed the fixture. A fixture the bot
+    can't see is a silently missed market, so pairs present in the Kalshi-derived list
+    but absent from the primary are appended (their synthesized ids carry no lineup
+    support; callers must scope lineup fetches to the primary list).
+    """
+    known = {frozenset((f.home_team, f.away_team)) for f in primary}
+    extra = [
+        f for f in kalshi_derived if frozenset((f.home_team, f.away_team)) not in known
+    ]
+    if extra:
+        logger.info(
+            "Added %d Kalshi-only fixture(s) API-Football doesn't list yet: %s",
+            len(extra),
+            ", ".join(f"{f.home_team} vs {f.away_team}" for f in extra),
+        )
+    return primary + extra
+
+
 def _open_interest(markets: list[dict[str, Any]], ticker: str) -> float:
     for market in markets:
         if str(market.get("ticker", "")) == ticker:
@@ -195,7 +219,7 @@ def default_outcome_resolver(
     when both team names appear in the ``yes_sub_title`` fields of the group's markets.
     Falls back to deprecated ``title``/``subtitle`` text search for other market formats.
     """
-    from features.teams import canonical
+    from features.teams import canonical_market_team
     from ingestion.kalshi import implied_yes_price
 
     home = fixture.home_team.lower()
@@ -211,10 +235,12 @@ def default_outcome_resolver(
         groups.setdefault(key, []).append(market)
 
     for _key, group in groups.items():
-        # Apply canonical() so "Turkiye"→"Turkey", "Congo DR"→"DR Congo", etc.
-        # Fixture names are already canonical; yes_sub_title values are raw Kalshi strings.
+        # Apply canonical_market_team() so "Turkiye"→"Turkey" AND knockout decorations
+        # strip ("Reg Time: USA"→"United States" — canonicalizing the full string missed
+        # every aliased team). Fixture names are already canonical.
         canonical_subs = [
-            canonical(str(m.get("yes_sub_title", ""))).lower() for m in group
+            canonical_market_team(str(m.get("yes_sub_title", ""))).lower()
+            for m in group
         ]
         has_home = any(home in s for s in canonical_subs)
         has_away = any(away in s for s in canonical_subs)
@@ -235,7 +261,9 @@ def default_outcome_resolver(
             if price is None:
                 continue
             ticker = str(market.get("ticker", ""))
-            yes_sub = canonical(str(market.get("yes_sub_title", ""))).lower()
+            yes_sub = canonical_market_team(
+                str(market.get("yes_sub_title", ""))
+            ).lower()
             if "draw" in yes_sub or "tie" in yes_sub:
                 resolved["D"] = (ticker, price)
             elif home in yes_sub:
@@ -738,17 +766,18 @@ async def run_live(*, dry_run: bool = True) -> list[Signal]:
 
     raw_fixtures = await api_football.fetch_fixtures()
     fixtures = api_football.upcoming(api_football.parse_fixtures(raw_fixtures))
-    # Lineups are only fetchable for real API-Football fixture ids; the Kalshi fallback
-    # below synthesises ids, so lineup enrichment is skipped on that path.
-    fixtures_have_real_ids = bool(fixtures)
+    # Lineups are only fetchable for real API-Football fixture ids; the Kalshi-derived
+    # fixtures below synthesise ids, so lineup enrichment is scoped to this list.
+    real_fixtures = list(fixtures)
     markets = await kalshi.get_markets(status="open")
     if not markets:
         logger.warning("No Kalshi markets; nothing to do")
         return []
-    if not fixtures:
-        # API-Football free tier blocks 2026 season — derive fixtures from KXWCGAME
-        # markets instead (team names live in yes_sub_title; dates in ticker).
-        fixtures = kalshi.parse_wc_fixtures(markets)
+    # Union in fixtures only Kalshi knows (knockout pairings API-Football lags on), and
+    # fall back to the Kalshi-derived list entirely when API-Football serves nothing
+    # (free tier blocks the 2026 season; team names live in yes_sub_title, dates in the
+    # ticker).
+    fixtures = _union_fixtures(fixtures, kalshi.parse_wc_fixtures(markets))
     if not fixtures:
         logger.warning("No upcoming WC fixtures from any source; nothing to do")
         return []
@@ -832,9 +861,7 @@ async def run_live(*, dry_run: bool = True) -> list[Signal]:
     ) as exc:  # noqa: BLE001 — peak read must not block signal generation
         logger.warning("Could not read historical peak/orders: %s", exc)
 
-    lineups_by_fixture = (
-        await _fetch_lineups(fixtures) if fixtures_have_real_ids else {}
-    )
+    lineups_by_fixture = await _fetch_lineups(real_fixtures) if real_fixtures else {}
 
     analysis_rows: list[LegAnalysis] = []
     signals = generate_signals(
