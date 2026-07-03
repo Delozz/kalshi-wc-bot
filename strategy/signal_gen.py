@@ -28,7 +28,7 @@ from model import calibration as calib_mod
 from model import dixon_coles
 from model import predict as predict_mod
 from model.dataset import WC_HOSTS, build_live_features
-from schemas import Signal
+from schemas import LegAnalysis, Signal
 from strategy import edge as edge_mod
 from strategy import risk
 
@@ -141,6 +141,41 @@ def _kalshi_anchor(
     return {outcome: price / total for outcome, price in prices.items()}
 
 
+def _leg_row(
+    cycle_ts: datetime,
+    fixture: Fixture,
+    *,
+    leg: str | None,
+    ticker: str | None,
+    price: float | None,
+    raw: float | None,
+    tilted: float | None,
+    anchor_prob: float | None,
+    anchor_source: str | None,
+    blended: float | None,
+    edge: float | None,
+    decision: str,
+) -> LegAnalysis:
+    """One fixture-board row: a leg's probability breakdown plus the decision taken."""
+    return LegAnalysis(
+        cycle_ts=cycle_ts,
+        fixture_id=str(fixture.fixture_id),
+        home_team=fixture.home_team,
+        away_team=fixture.away_team,
+        kickoff_utc=fixture.kickoff_utc,
+        leg=leg,  # type: ignore[typeddict-item]  # Outcome | None; str kept for callers
+        ticker=ticker,
+        kalshi_price=price,
+        raw_model_prob=raw,
+        tilted_prob=tilted,
+        anchor_prob=anchor_prob,
+        anchor_source=anchor_source,
+        blended_prob=blended,
+        edge=edge,
+        decision=decision,
+    )
+
+
 def _open_interest(markets: list[dict[str, Any]], ticker: str) -> float:
     for market in markets:
         if str(market.get("ticker", "")) == ticker:
@@ -235,6 +270,7 @@ def generate_signals(
     squad_ratings_by_team: dict[str, dict[int, float]] | None = None,
     predictor: Predictor | None = None,
     book_probs_by_pair: dict[frozenset[str], dict[str, float]] | None = None,
+    analysis: list[LegAnalysis] | None = None,
 ) -> list[Signal]:
     """Produce sized, risk-checked signals across all outcomes for the given fixtures.
 
@@ -273,7 +309,14 @@ def generate_signals(
 
     Only the single highest-edge leg of any fixture is bet: the H/D/A legs of a 3-way market
     are mutually exclusive, so stacking them concentrates the stake on one match and the
-    draw+underdog pair is one "favorite doesn't win" bet placed twice."""
+    draw+underdog pair is one "favorite doesn't win" bet placed twice.
+
+    ``analysis`` (optional) is a caller-supplied list that collects one :class:`LegAnalysis`
+    row per outcome leg per fixture — including legs that produced NO signal, with the
+    reason (``held``, ``filtered:<guard>``, ``below_threshold``, ``one_per_fixture``,
+    ``risk:<reason>``, ``no_market``). ``run_live`` persists these to the
+    ``fixture_analysis`` table; the dashboard's fixture board renders them. ``None``
+    (the default) skips collection entirely."""
     hosts_by_year = hosts_by_year or WC_HOSTS
     # Markets we already hold a position in — never re-bet them (no averaging into an open
     # position across cycles), so each market gets at most one entry.
@@ -287,6 +330,10 @@ def generate_signals(
         peak_bankroll_cents if peak_bankroll_cents is not None else bankroll_cents
     ) / 100.0
     exposure = open_exposure_cents / 100.0
+    # One timestamp per call groups this cycle's board rows; phase 2 mutates the rows'
+    # decisions in place (TypedDicts are dicts), keyed by ticker (unique per leg).
+    cycle_ts = datetime.now(timezone.utc)
+    row_by_ticker: dict[str, LegAnalysis] = {}
 
     # Phase 1: build every candidate signal that clears the edge threshold, across all
     # fixtures/outcomes, WITHOUT applying the sequential position/exposure caps yet. We
@@ -298,6 +345,24 @@ def generate_signals(
             logger.info(
                 "No Kalshi markets for %s vs %s", fixture.home_team, fixture.away_team
             )
+            if analysis is not None:
+                # One row marks the coverage gap so the board surfaces resolver misses.
+                analysis.append(
+                    _leg_row(
+                        cycle_ts,
+                        fixture,
+                        leg=None,
+                        ticker=None,
+                        price=None,
+                        raw=None,
+                        tilted=None,
+                        anchor_prob=None,
+                        anchor_source=None,
+                        blended=None,
+                        edge=None,
+                        decision="no_market",
+                    )
+                )
             continue
 
         year = _year_of(fixture.kickoff_utc)
@@ -311,6 +376,9 @@ def generate_signals(
             host=host,
         )
         probs = predict(fixture, features)
+        raw_probs = dict(
+            probs
+        )  # engine output, pre-tilt — the board's "raw model" column
 
         # Confederation-drift correction (engine-agnostic, before any finer prior): raw ELO
         # over-rates AFC/CONCACAF and under-rates UEFA/CONMEBOL because each pool is only
@@ -344,15 +412,17 @@ def generate_signals(
                 if lineup_delta:
                     probs = edge_mod.apply_lineup_prior(probs, lineup_delta)
 
+        tilted_probs = dict(probs)  # post-tilt, pre-anchor — "the model's view"
+
         # Market anchor — the last word before edge/sizing. Shrink the (tilted) model
         # vector toward the sportsbook no-vig consensus, or toward the fixture's own
         # normalized Kalshi prices when no book covers it (Devon-ratified fallback:
         # uncovered fixtures defer to the line rather than trade the raw model).
         anchor = _book_hda(fixture, book_probs_by_pair)
-        anchor_src = "book"
+        anchor_src: str | None = "book"
         if anchor is None:
             anchor = _kalshi_anchor(outcome_markets)
-            anchor_src = "kalshi"
+            anchor_src = "kalshi" if anchor is not None else None
         if anchor is not None:
             raw_probs = probs
             probs = edge_mod.blend_with_book(probs, anchor)
@@ -402,6 +472,26 @@ def generate_signals(
             model_prob = probs.get(outcome)
             if model_prob is None:
                 continue
+            # Board row for this leg — every leg gets one, whatever happens to it below.
+            # "candidate" is provisional; each exit path overwrites it with its reason.
+            row: LegAnalysis | None = None
+            if analysis is not None:
+                row = _leg_row(
+                    cycle_ts,
+                    fixture,
+                    leg=outcome,
+                    ticker=ticker,
+                    price=yes_price,
+                    raw=raw_probs.get(outcome),
+                    tilted=tilted_probs.get(outcome),
+                    anchor_prob=(anchor or {}).get(outcome),
+                    anchor_source=anchor_src,
+                    blended=model_prob,
+                    edge=model_prob - yes_price,
+                    decision="candidate",
+                )
+                analysis.append(row)
+                row_by_ticker[ticker] = row
             # Never add to a market we already hold: skip it entirely so a persistent edge
             # can't grow the same position across cycles (the topping-up we want to avoid).
             if ticker in held:
@@ -410,6 +500,8 @@ def generate_signals(
                     ticker,
                     outcome,
                 )
+                if row is not None:
+                    row["decision"] = "held"
                 continue
             # Drop legs the market is better-informed on (longshot floor, model/market
             # mismatch, draw/upset vs an overwhelming favorite) before edge/sizing.
@@ -430,6 +522,8 @@ def generate_signals(
                     yes_price,
                     elo_gap,
                 )
+                if row is not None:
+                    row["decision"] = f"filtered:{admit.reason}"
                 continue
             signal = edge_mod.build_signal(
                 match_id=(
@@ -443,6 +537,8 @@ def generate_signals(
                 threshold=threshold,
             )
             if signal is None:
+                if row is not None:
+                    row["decision"] = "below_threshold"
                 continue
             candidates.append((signal, ticker))
 
@@ -462,12 +558,15 @@ def generate_signals(
 
     signals: list[Signal] = []
     for signal, ticker in candidates:
+        row = row_by_ticker.get(ticker)
         event = _event_prefix(ticker)
         if event in claimed_events:
             logger.info(
                 "Signal %s skipped: already betting this fixture (one bet per match)",
                 ticker,
             )
+            if row is not None:
+                row["decision"] = "one_per_fixture"
             continue
         decision = risk.check_all(
             bankroll=bankroll,
@@ -479,9 +578,13 @@ def generate_signals(
         )
         if not decision.approved:
             logger.info("Signal %s rejected by risk: %s", ticker, decision.reason)
+            if row is not None:
+                row["decision"] = f"risk:{decision.reason}"
             continue
 
         signals.append(signal)
+        if row is not None:
+            row["decision"] = "signal"
         claimed_events.add(event)
         exposure += signal["bet_size_cents"] / 100.0
         n_open += 1
@@ -733,6 +836,7 @@ async def run_live(*, dry_run: bool = True) -> list[Signal]:
         await _fetch_lineups(fixtures) if fixtures_have_real_ids else {}
     )
 
+    analysis_rows: list[LegAnalysis] = []
     signals = generate_signals(
         fixtures=fixtures,
         history=history,
@@ -747,7 +851,19 @@ async def run_live(*, dry_run: bool = True) -> list[Signal]:
         lineups_by_fixture=lineups_by_fixture,
         squad_ratings_by_team=squad_ratings_by_team,
         book_probs_by_pair=book_probs_by_pair,
+        analysis=analysis_rows,
     )
+    # Persist the fixture board BEFORE order placement so the cycle's full reasoning is
+    # recorded even if an order call dies. L9: a persistence failure never blocks trading.
+    if analysis_rows:
+        try:
+            from data.db import connect, init_db, log_fixture_analysis
+
+            init_db()
+            with connect() as conn:
+                log_fixture_analysis(conn, analysis_rows)
+        except Exception as exc:  # noqa: BLE001 — board is observability, not trading
+            logger.warning("Could not persist fixture analysis: %s", exc)
     for signal in signals:
         result = await order_manager.place_order(signal, dry_run=dry_run)
         _persist(signal, result, dry_run=dry_run)

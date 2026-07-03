@@ -95,9 +95,105 @@ def _position_theses(positions: list[Any]) -> dict[str, str]:
     theses: dict[str, str] = {}
     for pos in positions:
         sig = _signal_for_ticker(pos.ticker)
-        if sig:
+        row = _analysis_for_ticker(pos.ticker)
+        if row is not None:
+            # Full thesis from the analysis row (model/book/Kalshi breakdown); the bet
+            # size still comes from the signal that sized it.
+            theses[pos.ticker] = explain_analysis(
+                row, bet_size_cents=(sig or {}).get("bet_size_cents")
+            )
+        elif sig:
+            # Pre-board bets: reduced thesis from the stored signal fields only.
             theses[pos.ticker] = explain_signal(sig)
     return theses
+
+
+def _latest_board() -> list[dict[str, Any]]:
+    """The latest signal cycle's fixture-analysis rows, or [] on any failure (L9).
+
+    Sorted for display: fixtures with the largest absolute blended-vs-Kalshi edge first
+    (the discrepancies worth a human look float to the top), legs in H/D/A order within
+    a fixture, no-market rows last.
+    """
+    try:
+        from data.db import connect, latest_analysis
+
+        with connect() as conn:
+            rows = [dict(row) for row in latest_analysis(conn)]
+    except Exception as exc:  # noqa: BLE001 — dashboard must render even with no DB
+        logger.debug("Could not read fixture analysis: %s", exc)
+        return []
+
+    def fixture_key(row: dict[str, Any]) -> tuple[str, str]:
+        return (str(row["home_team"]), str(row["away_team"]))
+
+    max_edge: dict[tuple[str, str], float] = {}
+    for row in rows:
+        edge = abs(float(row["edge"] or 0.0))
+        key = fixture_key(row)
+        max_edge[key] = max(max_edge.get(key, 0.0), edge)
+
+    leg_order = {"H": 0, "D": 1, "A": 2, None: 3}
+    rows.sort(
+        key=lambda r: (
+            -max_edge[fixture_key(r)],
+            fixture_key(r),
+            leg_order.get(r["leg"], 3),
+        )
+    )
+    return rows
+
+
+def _analysis_for_ticker(ticker: str) -> dict[str, Any] | None:
+    """The analysis row behind a placed bet, or None (pre-feature bets / any failure)."""
+    if not ticker:
+        return None
+    try:
+        from data.db import analysis_for_ticker, connect
+
+        with connect() as conn:
+            row = analysis_for_ticker(conn, ticker)
+        return dict(row) if row else None
+    except Exception as exc:  # noqa: BLE001 — dashboard must render even with no DB
+        logger.debug("Could not read analysis for %s: %s", ticker, exc)
+        return None
+
+
+def _describe_leg(leg: str | None, home: str, away: str) -> str:
+    """Human phrasing of a bet leg: who has to do what for the YES to pay."""
+    if leg == "H":
+        return f"{home} to beat {away}"
+    if leg == "A":
+        return f"{away} to beat {home}"
+    if leg == "D":
+        return f"Draw, {home}-{away}"
+    return f"{home} vs {away}"
+
+
+def explain_analysis(row: dict[str, Any], *, bet_size_cents: int | None = None) -> str:
+    """One-line thesis for a bet from its fixture-analysis row.
+
+    Example: "Portugal to beat Ghana: model 55%, books 58%, Kalshi 48c -> +9.5% edge,
+    half-Kelly $1.20". The anchor phrasing says where the market side of the blend came
+    from — book consensus, or the Kalshi price itself when no book covered the fixture.
+    """
+    matchup = _describe_leg(
+        row.get("leg"), str(row["home_team"]), str(row["away_team"])
+    )
+    tilted = float(row.get("tilted_prob") or 0.0)
+    price = float(row.get("kalshi_price") or 0.0)
+    edge = float(row.get("edge") or 0.0)
+    if row.get("anchor_source") == "book":
+        anchor_txt = f"books {float(row.get('anchor_prob') or 0.0):.0%}"
+    else:
+        anchor_txt = "no book line (Kalshi-anchored)"
+    thesis = (
+        f"{matchup}: model {tilted:.0%}, {anchor_txt}, "
+        f"Kalshi {price * 100:.0f}c -> {edge:+.1%} edge"
+    )
+    if bet_size_cents:
+        thesis += f", half-Kelly ${bet_size_cents / 100:.2f}"
+    return thesis
 
 
 def _decode_match(match_id: str) -> str | None:
@@ -141,12 +237,15 @@ def render(
     signals: list[dict[str, Any]],
     *,
     position_theses: dict[str, str] | None = None,
+    board: list[dict[str, Any]] | None = None,
     console: Console | None = None,
 ) -> None:
     """Render the dashboard tables to the console.
 
     ``position_theses`` maps an open position's ticker to its plain-English bet thesis
-    (from ``_position_theses``); tickers absent from it render as a dash.
+    (from ``_position_theses``); tickers absent from it render as a dash. ``board``
+    (from ``_latest_board``) is the latest cycle's per-leg model-vs-Kalshi breakdown;
+    omitted or empty, the board table is skipped (e.g. before the first analysis cycle).
     """
     console = console or Console()
     position_theses = position_theses or {}
@@ -185,6 +284,53 @@ def render(
         )
     console.print(signal_table)
 
+    if board:
+        cycle = str(board[0].get("cycle_ts", ""))[:16].replace("T", " ")
+        board_table = Table(title=f"FIXTURE BOARD — model vs market, cycle {cycle} UTC")
+        for column in (
+            "Fixture",
+            "Leg",
+            "Model",
+            "Book",
+            "Blend",
+            "Kalshi",
+            "Edge",
+            "Decision",
+        ):
+            board_table.add_column(
+                column,
+                justify="right" if column not in ("Fixture", "Decision") else "left",
+            )
+        last_fixture = None
+        for row in board:
+            fixture = f"{row['home_team']} vs {row['away_team']}"
+            shown = fixture if fixture != last_fixture else ""
+            last_fixture = fixture
+            if row.get("leg") is None:
+                board_table.add_row(
+                    shown, "—", "—", "—", "—", "—", "—", "no Kalshi market"
+                )
+                continue
+
+            def pct(key: str) -> str:
+                value = row.get(key)
+                return f"{float(value):.0%}" if value is not None else "—"
+
+            price = row.get("kalshi_price")
+            edge = row.get("edge")
+            book = pct("anchor_prob") if row.get("anchor_source") == "book" else "—"
+            board_table.add_row(
+                shown,
+                str(row["leg"]),
+                pct("tilted_prob"),
+                book,
+                pct("blended_prob"),
+                f"{float(price) * 100:.0f}c" if price is not None else "—",
+                f"{float(edge):+.1%}" if edge is not None else "—",
+                str(row["decision"]),
+            )
+        console.print(board_table)
+
 
 def main() -> None:
     import asyncio
@@ -203,6 +349,7 @@ def main() -> None:
         state,
         _recent_signals(),
         position_theses=_position_theses(state.positions),
+        board=_latest_board(),
     )
 
 

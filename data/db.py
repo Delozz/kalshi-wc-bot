@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from config import settings
-from schemas import Order, Signal
+from schemas import LegAnalysis, Order, Signal
 
 logger = logging.getLogger(__name__)
 
@@ -74,6 +74,28 @@ CREATE TABLE IF NOT EXISTS bankroll_log (
     balance_cents INTEGER NOT NULL,
     event         TEXT
 );
+
+CREATE TABLE IF NOT EXISTS fixture_analysis (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    cycle_ts       TEXT NOT NULL,
+    fixture_id     TEXT NOT NULL,
+    home_team      TEXT NOT NULL,
+    away_team      TEXT NOT NULL,
+    kickoff_utc    TEXT,
+    leg            TEXT,
+    ticker         TEXT,
+    kalshi_price   REAL,
+    raw_model_prob REAL,
+    tilted_prob    REAL,
+    anchor_prob    REAL,
+    anchor_source  TEXT,
+    blended_prob   REAL,
+    edge           REAL,
+    decision       TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_fixture_analysis_cycle
+    ON fixture_analysis (cycle_ts);
 """
 
 
@@ -213,6 +235,62 @@ def real_peak_bankroll(conn: sqlite3.Connection) -> int | None:
         "SELECT MAX(balance_cents) AS peak FROM bankroll_log WHERE event = 'sync'"
     ).fetchone()
     return int(row["peak"]) if row and row["peak"] is not None else None
+
+
+def log_fixture_analysis(conn: sqlite3.Connection, rows: list[LegAnalysis]) -> None:
+    """Insert one signal cycle's per-leg analysis rows (the fixture board's data)."""
+    conn.executemany(
+        "INSERT INTO fixture_analysis (cycle_ts, fixture_id, home_team, away_team, "
+        "kickoff_utc, leg, ticker, kalshi_price, raw_model_prob, tilted_prob, "
+        "anchor_prob, anchor_source, blended_prob, edge, decision) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        [
+            (
+                _iso(row["cycle_ts"]),
+                row["fixture_id"],
+                row["home_team"],
+                row["away_team"],
+                row["kickoff_utc"],
+                row["leg"],
+                row["ticker"],
+                row["kalshi_price"],
+                row["raw_model_prob"],
+                row["tilted_prob"],
+                row["anchor_prob"],
+                row["anchor_source"],
+                row["blended_prob"],
+                row["edge"],
+                row["decision"],
+            )
+            for row in rows
+        ],
+    )
+    conn.commit()
+
+
+def latest_analysis(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    """Every fixture_analysis row from the most recent signal cycle (the board view)."""
+    newest = conn.execute("SELECT MAX(cycle_ts) AS ts FROM fixture_analysis").fetchone()
+    if newest is None or newest["ts"] is None:
+        return []
+    return conn.execute(
+        "SELECT * FROM fixture_analysis WHERE cycle_ts = ? "
+        "ORDER BY home_team, away_team, leg",
+        (str(newest["ts"]),),
+    ).fetchall()
+
+
+def analysis_for_ticker(conn: sqlite3.Connection, ticker: str) -> sqlite3.Row | None:
+    """The most recent 'signal' analysis row for a market ticker (the bet's thesis data).
+
+    Only ``decision = 'signal'`` rows qualify — they describe the cycle that actually
+    placed the bet, not later cycles where the market shows up as held/skipped.
+    """
+    return conn.execute(
+        "SELECT * FROM fixture_analysis WHERE ticker = ? AND decision = 'signal' "
+        "ORDER BY cycle_ts DESC LIMIT 1",
+        (ticker,),
+    ).fetchone()
 
 
 def unsettled_orders_for_fixture(
