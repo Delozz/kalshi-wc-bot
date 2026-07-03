@@ -47,6 +47,7 @@ class Settings:
     the_odds_api_key: str
     kalshi_env: KalshiEnv
     model_engine: ModelEngine
+    model_blend_weight: float
     min_edge_threshold: float
     max_bet_fraction: float
     max_portfolio_exposure: float
@@ -56,6 +57,7 @@ class Settings:
     lineup_weight: float
     squad_weight: float
     dc_squad_prior_weight: float
+    dc_temperature: float
     confederation_weight: float
     db_path: Path
     log_level: str
@@ -88,6 +90,12 @@ def load_settings() -> Settings:
         the_odds_api_key=_get_str("THE_ODDS_API_KEY", ""),
         kalshi_env=kalshi_env,
         model_engine=model_engine,
+        # The model's share when its H/D/A vector is shrunk toward a market anchor
+        # (sportsbook no-vig consensus, or normalized Kalshi prices when no book covers the
+        # fixture). 0.30 means the anchor carries 70% — chosen after 18 settled live bets
+        # showed the line's Brier (0.077) beating the raw model's (0.144): the model is the
+        # tiebreaker, not the truth. 1.0 disables anchoring (raw model, the old behaviour).
+        model_blend_weight=_get_float("MODEL_BLEND_WEIGHT", 0.30),
         min_edge_threshold=_get_float("MIN_EDGE_THRESHOLD", 0.04),
         max_bet_fraction=_get_float("MAX_BET_FRACTION", 0.05),
         max_portfolio_exposure=_get_float("MAX_PORTFOLIO_EXPOSURE", 0.20),
@@ -109,6 +117,14 @@ def load_settings() -> Settings:
         # squad ratings exist — so kept modest and demo-checked. 0 disables it. Only the DC
         # engine reads this; the classifier path is unaffected.
         dc_squad_prior_weight=_get_float("DC_SQUAD_PRIOR_WEIGHT", 0.5),
+        # Temperature exponent applied to the live DC {H,D,A} vector (L5 calibration
+        # layer): p**tau renormalized; <1 flattens, >1 sharpens, 1.0 = identity. The 2018
+        # out-of-sample fit gave tau=1.224 (slightly UNDER-confident unconditionally;
+        # Brier 0.5727 -> 0.5681, n=64 — not significant), while the live losses were
+        # selection-conditional overconfidence, addressed by the market anchor. Sharpening
+        # would widen phantom edges, so identity ships until demo data justifies more.
+        # Refit: python -m backtest.strategy_backtest --model dc --fit-dc-temperature
+        dc_temperature=_get_float("DC_TEMPERATURE", 1.0),
         # Strength of the confederation-drift correction applied to the model's H/D/A vector
         # and to the favorite/ELO-gap risk inputs. 1.0 = the full empirically-measured ELO
         # offsets (the validated default); values in (0, 1) dial it back, 0 disables it. ELO

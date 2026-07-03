@@ -28,15 +28,22 @@ def has_edge(edge: float, *, threshold: float | None = None) -> bool:
     return edge >= thr
 
 
-def apply_lineup_adjustment(model_prob: float, lineup_delta: float) -> float:
-    """Nudge a model probability by an already-signed lineup strength delta, clamped 0–1.
+def apply_lineup_prior(
+    probs: dict[str, float],
+    lineup_delta: float,
+    *,
+    weight: float | None = None,
+) -> dict[str, float]:
+    """Tilt the full {H, D, A} vector toward the stronger announced XI, renormalized.
 
-    ``lineup_delta`` is the home-minus-away starting-XI strength for *this* outcome
-    (signed upstream: positive favours the bet, negative opposes it). It is 0.0 whenever
-    lineups are not yet announced, so this is the identity then (zero-impact fallback).
+    ``lineup_delta`` is the home-minus-away starting-XI strength in ``[-1, 1]`` (0.0 until
+    lineups are announced — identity, the zero-impact fallback). Same mechanic as
+    :func:`apply_squad_prior`, weighted by ``settings.lineup_weight``. This replaced the
+    old per-leg nudge, which scaled a single leg in isolation and could leave the three
+    legs summing above 1 — edge fabricated by the adjustment itself.
     """
-    adjusted = model_prob * (1.0 + settings.lineup_weight * lineup_delta)
-    return max(0.0, min(1.0, adjusted))
+    w = settings.lineup_weight if weight is None else weight
+    return apply_squad_prior(probs, lineup_delta, weight=w)
 
 
 def apply_squad_prior(
@@ -115,6 +122,41 @@ def apply_confederation_prior(
     return {outcome: value / total for outcome, value in scaled.items()}
 
 
+def blend_with_book(
+    probs: dict[str, float],
+    anchor: dict[str, float] | None,
+    *,
+    weight: float | None = None,
+) -> dict[str, float]:
+    """Shrink the model's H/D/A vector toward a market anchor, renormalized.
+
+    ``p_final = w * p_model + (1 - w) * p_anchor`` per outcome, where ``w`` is the
+    *model's* share (``settings.model_blend_weight``, default 0.30 — the anchor carries
+    70%). The anchor is the sportsbook no-vig consensus when available, else normalized
+    Kalshi prices. This is the core anti-phantom-edge control: 18 settled live bets showed
+    the line's Brier (0.077) beating the raw model's (0.144), so an "edge" that exists only
+    in the raw model is far likelier mis-calibration than value. After blending, an edge
+    survives only where the anchor itself diverges from the Kalshi price (book-vs-Kalshi
+    mispricing) and/or the model's residual disagreement is large.
+
+    Identity (returns ``probs`` unchanged) when the anchor is missing, doesn't cover every
+    outcome the model prices, or ``weight >= 1.0`` — the zero-impact fallback.
+    """
+    w = settings.model_blend_weight if weight is None else weight
+    if not probs or not anchor or w >= 1.0:
+        return dict(probs)
+    if any(outcome not in anchor for outcome in probs):
+        return dict(probs)
+    blended = {
+        outcome: w * prob + (1.0 - w) * float(anchor[outcome])
+        for outcome, prob in probs.items()
+    }
+    total = sum(blended.values())
+    if total <= 0.0:
+        return dict(probs)
+    return {outcome: value / total for outcome, value in blended.items()}
+
+
 def build_signal(
     *,
     match_id: str,
@@ -124,25 +166,24 @@ def build_signal(
     bankroll: float,
     side: OrderSide = "YES",
     threshold: float | None = None,
-    lineup_delta: float = 0.0,
 ) -> Signal | None:
     """Build a sized :class:`Signal` if the edge clears the threshold, else ``None``.
 
-    When ``lineup_delta`` is non-zero (lineups announced), the model probability is
-    nudged before the edge check; with the default 0.0 the behaviour is unchanged.
+    ``model_prob`` arrives fully adjusted (confederation/squad/lineup tilts and the
+    market-anchor blend are applied upstream in ``signal_gen``); this only checks the
+    edge and sizes the bet.
     """
-    adjusted_prob = apply_lineup_adjustment(model_prob, lineup_delta)
-    edge = compute_edge(adjusted_prob, kalshi_yes_price)
+    edge = compute_edge(model_prob, kalshi_yes_price)
     if not has_edge(edge, threshold=threshold):
         logger.debug("No signal for %s: edge %.3f below threshold", market_ticker, edge)
         return None
 
-    sizing = kelly.half_kelly_size(adjusted_prob, kalshi_yes_price, bankroll)
+    sizing = kelly.half_kelly_size(model_prob, kalshi_yes_price, bankroll)
     return Signal(
         match_id=match_id,
         market_ticker=market_ticker,
         side=side,
-        model_prob=adjusted_prob,
+        model_prob=model_prob,
         market_implied=kalshi_yes_price,
         edge=edge,
         kelly_fraction=sizing.used_fraction,

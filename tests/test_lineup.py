@@ -2,7 +2,7 @@
 
 Pins the two correctness properties of the lineup-adjustment plan: the home-minus-away
 sign convention / clamping in ``features.lineup`` and the zero-impact fallback plus
-0–1 clamping in ``strategy.edge.apply_lineup_adjustment``.
+vector renormalization in ``strategy.edge.apply_lineup_prior``.
 """
 
 from __future__ import annotations
@@ -46,17 +46,29 @@ def test_delta_clamped_to_unit_range() -> None:
     assert lineup.lineup_strength_delta(_xi(0.0), _xi(50.0)) == -1.0
 
 
-def test_adjustment_identity_at_zero_delta() -> None:
-    # The zero-impact fallback: no announced lineup => probability is untouched.
-    assert edge.apply_lineup_adjustment(0.42, 0.0) == 0.42
+def test_lineup_prior_identity_at_zero_delta() -> None:
+    # The zero-impact fallback: no announced lineup => the vector is untouched.
+    probs = {"H": 0.42, "D": 0.30, "A": 0.28}
+    assert edge.apply_lineup_prior(probs, 0.0) == probs
 
 
-def test_adjustment_moves_probability_with_delta() -> None:
-    weight = edge.settings.lineup_weight
-    assert math.isclose(edge.apply_lineup_adjustment(0.50, 1.0), 0.50 * (1.0 + weight))
-    assert edge.apply_lineup_adjustment(0.50, -1.0) < 0.50
+def test_lineup_prior_tilts_and_renormalizes() -> None:
+    # A stronger home XI lifts H, shrinks D and A, and the vector still sums to 1 —
+    # the old per-leg nudge could push the three legs above a total of 1.
+    probs = {"H": 0.40, "D": 0.30, "A": 0.30}
+    tilted = edge.apply_lineup_prior(probs, 0.5, weight=0.10)
+    assert tilted["H"] > probs["H"]
+    assert tilted["D"] < probs["D"]
+    assert tilted["A"] < probs["A"]
+    assert math.isclose(sum(tilted.values()), 1.0)
+    # Reversing the sides tilts the other way.
+    reversed_tilt = edge.apply_lineup_prior(probs, -0.5, weight=0.10)
+    assert reversed_tilt["A"] > probs["A"]
 
 
-def test_adjustment_clamped_to_probability_range() -> None:
-    assert edge.apply_lineup_adjustment(0.99, 50.0) == 1.0
-    assert edge.apply_lineup_adjustment(0.50, -50.0) == 0.0
+def test_lineup_prior_extreme_delta_stays_valid() -> None:
+    # Even an absurd delta produces a valid distribution (shrink factor is capped).
+    probs = {"H": 0.40, "D": 0.30, "A": 0.30}
+    tilted = edge.apply_lineup_prior(probs, 50.0, weight=1.0)
+    assert all(0.0 < p < 1.0 for p in tilted.values())
+    assert math.isclose(sum(tilted.values()), 1.0)

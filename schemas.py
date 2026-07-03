@@ -59,6 +59,32 @@ class Signal(TypedDict):
     generated_at: datetime
 
 
+class LegAnalysis(TypedDict):
+    """One outcome leg's full probability breakdown for one signal cycle.
+
+    Mirrors the ``fixture_analysis`` table. Every leg of every upcoming fixture gets a row
+    each cycle — including legs that produced no signal — so the dashboard's fixture board
+    can show the model-vs-Kalshi picture and the *reason* nothing was bet. ``leg`` is None
+    for a fixture with no matching Kalshi market (one row marks the coverage gap).
+    """
+
+    cycle_ts: datetime
+    fixture_id: str
+    home_team: str
+    away_team: str
+    kickoff_utc: str | None
+    leg: Outcome | None
+    ticker: str | None
+    kalshi_price: float | None
+    raw_model_prob: float | None  # engine output, before any tilt
+    tilted_prob: float | None  # after confed/squad/lineup tilts — "the model's view"
+    anchor_prob: float | None  # market anchor for this leg (book consensus or Kalshi)
+    anchor_source: str | None  # 'book' | 'kalshi' | None
+    blended_prob: float | None  # what edge/sizing actually ran on
+    edge: float | None  # blended_prob - kalshi_price
+    decision: str  # 'signal' | 'below_threshold' | 'filtered:<guard>' | 'held' | ...
+
+
 class Order(TypedDict):
     """An order placed on Kalshi — mirrors the `orders` table."""
 

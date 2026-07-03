@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import logging
 from datetime import date
+from statistics import median
 from typing import Any
 
 import httpx
@@ -79,3 +80,58 @@ def novig_from_h2h(outcomes: list[dict[str, Any]]) -> dict[str, float]:
     if total <= 0:
         return {}
     return {name: value / total for name, value in raw.items()}
+
+
+def consensus_book_probs(
+    events: list[dict[str, Any]],
+) -> dict[frozenset[str], dict[str, float]]:
+    """Median no-vig consensus per fixture across every bookmaker quoting it.
+
+    For each Odds API event, every bookmaker's h2h odds are de-vigged
+    (:func:`novig_from_h2h`), the per-outcome **median** across books is taken (robust to a
+    single stale/outlier line), and the result is renormalized to sum to 1.
+
+    Returns ``{frozenset({home, away}): {home: p, away: p, "Draw": p}}`` with canonical
+    (martj42) team names, so the caller matches fixtures regardless of which side each
+    source calls "home" (WC venues are neutral and sources disagree on orientation).
+    Events with no fully-usable book (all three outcomes de-vigged and name-matched)
+    are omitted — the caller's zero-impact fallback handles them (L9).
+    """
+    from features.teams import canonical
+
+    out: dict[frozenset[str], dict[str, float]] = {}
+    for event in events or []:
+        home = canonical(str(event.get("home_team") or ""))
+        away = canonical(str(event.get("away_team") or ""))
+        if not home or not away or home == away:
+            continue
+        wanted = {home, away, "Draw"}
+        samples: dict[str, list[float]] = {}
+        for book in event.get("bookmakers") or []:
+            h2h = next(
+                (m for m in (book.get("markets") or []) if m.get("key") == "h2h"),
+                None,
+            )
+            if h2h is None:
+                continue
+            fair = novig_from_h2h(h2h.get("outcomes") or [])
+            mapped = {
+                ("Draw" if name.strip().lower() == "draw" else canonical(name)): prob
+                for name, prob in fair.items()
+            }
+            if set(mapped) != wanted:
+                continue  # this book's names can't be oriented onto the fixture; skip it
+            for key, prob in mapped.items():
+                samples.setdefault(key, []).append(prob)
+        if set(samples) != wanted:
+            continue
+        consensus = {key: float(median(vals)) for key, vals in samples.items()}
+        total = sum(consensus.values())
+        if total <= 0:
+            continue
+        out[frozenset((home, away))] = {
+            key: value / total for key, value in consensus.items()
+        }
+    if out:
+        logger.info("Book consensus available for %d fixture(s)", len(out))
+    return out

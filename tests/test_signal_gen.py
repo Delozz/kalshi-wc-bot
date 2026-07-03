@@ -131,9 +131,10 @@ def test_one_bet_per_fixture_takes_highest_edge(monkeypatch) -> None:
 
 
 def test_only_outcome_with_edge_is_traded(monkeypatch) -> None:
-    # H has no edge (0.55 vs 0.60) and A is below threshold (0.18 vs 0.16 -> +0.02), so the
-    # draw is the only qualifying leg and therefore the bet — a non-favorite leg can win the
-    # single slot when the favorite offers no value.
+    # With a book anchor leaning draw (0.30 vs the 0.20 line), the draw is the only leg
+    # whose blended prob clears the threshold: H blends to 0.515 vs a 0.60 line (no edge)
+    # and A to 0.194 vs 0.16 (+0.034, below threshold). A non-favorite leg can win the
+    # single slot when the anchor, not just the raw model, sees value there.
     monkeypatch.setattr(signal_gen.predict_mod, "predict_outcome", _fixed_probs)
     history = _history()
     signals = signal_gen.generate_signals(
@@ -144,14 +145,23 @@ def test_only_outcome_with_edge_is_traded(monkeypatch) -> None:
         markets=_markets(60, 20, 16),
         bankroll_cents=20000,
         threshold=0.04,
+        book_probs_by_pair={
+            frozenset({"Brazil", "Serbia"}): {
+                "Brazil": 0.50,
+                "Draw": 0.30,
+                "Serbia": 0.20,
+            }
+        },
     )
     assert [_leg(s) for s in signals] == ["D"]
 
 
 def test_overpriced_underdog_leg_is_filtered(monkeypatch) -> None:
-    # A (0.18 vs 0.10) has the largest raw edge (+0.08) but a 1.8x model/market ratio, so the
-    # tightened underdog guard drops it before ranking. The favorite H (+0.05) is then the
-    # only admissible leg — proving A was excluded by the ratio, not merely out-ranked.
+    # The book agrees the underdog is worth 0.18 against a 0.10 Kalshi line, so even the
+    # *blended* A prob (0.18) clears the threshold (+0.08) — but at a 1.8x model/market
+    # ratio the tightened underdog guard still drops it before ranking. The favorite H
+    # (blended 0.585 vs 0.50, +0.085) is then the only admissible leg — proving A was
+    # excluded by the ratio, not merely out-ranked.
     monkeypatch.setattr(signal_gen.predict_mod, "predict_outcome", _fixed_probs)
     history = _history()
     signals = signal_gen.generate_signals(
@@ -162,6 +172,13 @@ def test_overpriced_underdog_leg_is_filtered(monkeypatch) -> None:
         markets=_markets(50, 40, 10),
         bankroll_cents=20000,
         threshold=0.04,
+        book_probs_by_pair={
+            frozenset({"Brazil", "Serbia"}): {
+                "Brazil": 0.60,
+                "Draw": 0.22,
+                "Serbia": 0.18,
+            }
+        },
     )
     assert [_leg(s) for s in signals] == ["H"]
 
@@ -307,6 +324,13 @@ def test_squad_prior_flips_bet_from_draw_to_favorite(monkeypatch) -> None:
     ratings = _ratings(history)
     markets = _markets(34, 23, 15)
 
+    book = {
+        frozenset({"Brazil", "Serbia"}): {
+            "Brazil": 0.42,
+            "Draw": 0.34,
+            "Serbia": 0.24,
+        }
+    }
     base = signal_gen.generate_signals(
         fixtures=[_fixture()],
         history=history,
@@ -315,6 +339,7 @@ def test_squad_prior_flips_bet_from_draw_to_favorite(monkeypatch) -> None:
         markets=markets,
         bankroll_cents=20000,
         threshold=0.04,
+        book_probs_by_pair=book,
     )
     assert [_leg(s) for s in base] == ["D"]
 
@@ -326,6 +351,7 @@ def test_squad_prior_flips_bet_from_draw_to_favorite(monkeypatch) -> None:
         markets=markets,
         bankroll_cents=20000,
         threshold=0.04,
+        book_probs_by_pair=book,
         squad_ratings_by_team={
             "Brazil": {1: 8.0, 2: 8.0},
             "Serbia": {1: 6.0, 2: 6.0},
@@ -380,10 +406,97 @@ def test_confederation_correction_suppresses_cross_confed_upset(monkeypatch) -> 
         markets=markets,
         bankroll_cents=20000,
         threshold=0.04,
+        # Books also favour Brazil over the Kalshi line, so the confed-corrected H leg
+        # survives the anchor blend; Japan's tilt-suppressed 0.19 blends to ~0.198 vs the
+        # 0.24 line — no phantom upset edge left.
+        book_probs_by_pair={
+            frozenset({"Brazil", "Japan"}): {
+                "Brazil": 0.52,
+                "Draw": 0.28,
+                "Japan": 0.20,
+            }
+        },
     )
     legs = {_leg(s) for s in signals}
     assert "A" not in legs  # Japan upset suppressed by the confederation correction
     assert legs == {"H"}  # the favorite (Brazil) is the single bet
+
+
+def test_book_agreeing_with_kalshi_kills_model_only_edge(monkeypatch) -> None:
+    # The anti-phantom-edge case that lost real money 18 times: the raw model prices the
+    # underdog at 0.40 vs a 0.25 line (+0.15 "edge"), but the books agree with Kalshi
+    # (0.24). Blended: 0.3*0.40 + 0.7*0.24 = 0.288 -> +0.038, below threshold. No bet —
+    # a raw-model opinion alone can no longer fire a signal.
+    monkeypatch.setattr(
+        signal_gen.predict_mod,
+        "predict_outcome",
+        lambda _b, _f: {"H": 0.35, "D": 0.25, "A": 0.40},
+    )
+    history = _history()
+    signals = signal_gen.generate_signals(
+        fixtures=[_fixture()],
+        history=history,
+        ratings=_ratings(history),
+        bundle={},
+        markets=_markets(50, 28, 25),
+        bankroll_cents=20000,
+        threshold=0.04,
+        book_probs_by_pair={
+            frozenset({"Brazil", "Serbia"}): {
+                "Brazil": 0.50,
+                "Draw": 0.26,
+                "Serbia": 0.24,
+            }
+        },
+    )
+    assert signals == []
+
+
+def test_book_kalshi_divergence_is_the_new_edge(monkeypatch) -> None:
+    # The strategy thesis after anchoring: books say the favorite is worth 0.60 but Kalshi
+    # prices it at 0.48. Blended H = 0.3*0.55 + 0.7*0.60 = 0.585 -> +0.105. The bet is
+    # driven by book-vs-Kalshi divergence, with the model as tiebreaker.
+    monkeypatch.setattr(signal_gen.predict_mod, "predict_outcome", _fixed_probs)
+    history = _history()
+    signals = signal_gen.generate_signals(
+        fixtures=[_fixture()],
+        history=history,
+        ratings=_ratings(history),
+        bundle={},
+        markets=_markets(48, 30, 22),
+        bankroll_cents=20000,
+        threshold=0.04,
+        book_probs_by_pair={
+            frozenset({"Brazil", "Serbia"}): {
+                "Brazil": 0.60,
+                "Draw": 0.25,
+                "Serbia": 0.15,
+            }
+        },
+    )
+    assert [_leg(s) for s in signals] == ["H"]
+
+
+def test_kalshi_anchor_fallback_kills_raw_model_edge(monkeypatch) -> None:
+    # No book coverage (Devon-ratified fallback): the model shrinks toward the normalized
+    # Kalshi prices themselves. On a realistically-vigged market (prices sum to 1.04) the
+    # raw +0.09 underdog edge blends to +0.02 and nothing trades.
+    monkeypatch.setattr(
+        signal_gen.predict_mod,
+        "predict_outcome",
+        lambda _b, _f: {"H": 0.40, "D": 0.25, "A": 0.35},
+    )
+    history = _history()
+    signals = signal_gen.generate_signals(
+        fixtures=[_fixture()],
+        history=history,
+        ratings=_ratings(history),
+        bundle={},
+        markets=_markets(50, 28, 26),
+        bankroll_cents=20000,
+        threshold=0.04,
+    )
+    assert signals == []
 
 
 def test_risk_blocks_on_stop_loss(monkeypatch) -> None:
