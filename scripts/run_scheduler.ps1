@@ -1,10 +1,10 @@
 # run_scheduler.ps1 — launcher for the Kalshi WC bot (Windows Task Scheduler).
 #
-# Runs the CONTINUOUS in-process loop in DRY-RUN mode (2026-07-01, Devon-approved): signals
-# are generated and logged to the DB but NO orders are placed while the market-anchored
-# model rework lands and validates. To resume live orders, add "--live-orders" back to the
-# ArgumentList below and restart the task. APScheduler fires the jobs on their cadences
-# (signals every 3h, settle every 2h, sync/bankroll every 30m) until the process is stopped. Registered to start at boot (-AtStartup) and auto-restart on crash,
+# Runs the CONTINUOUS in-process loop in LIVE-ORDER mode (restored 2026-07-03 after the
+# market-anchored model's clean dry-run validation cycle, Devon-approved). To pause real
+# orders, remove "--live-orders" from the ArgumentList below and restart the task.
+# APScheduler fires the jobs on their cadences (signals every 3h, settle every 2h,
+# sync/bankroll every 30m) until the process is stopped. Registered to start at boot (-AtStartup) and auto-restart on crash,
 # so it comes back by itself after a reboot. The host must NOT sleep (a sleeping PC freezes
 # the loop) — keep sleep disabled. (For one pass per run instead, add --once below and use
 # a timed trigger.)
@@ -50,14 +50,14 @@ if (Test-Path $venvPy) {
 }
 "$(Get-Date -Format o)  python=$python" | Out-File -FilePath $logFile -Append -Encoding utf8
 
-"$(Get-Date -Format o)  starting persistent loop (DRY-RUN - no orders placed)" | Out-File -FilePath $logFile -Append -Encoding utf8
+"$(Get-Date -Format o)  starting persistent loop (LIVE ORDERS)" | Out-File -FilePath $logFile -Append -Encoding utf8
 
 # Start-Process redirects at the OS level — captures output even if Python dies before
 # writing a single byte (unlike the PowerShell pipeline which requires bytes to flow).
 $stdoutLog = Join-Path $logDir "scheduler_stdout.log"
 $stderrLog = Join-Path $logDir "scheduler_stderr.log"
 $proc = Start-Process -FilePath $python `
-    -ArgumentList "-m", "scheduler.jobs" `
+    -ArgumentList "-m", "scheduler.jobs", "--live-orders" `
     -WorkingDirectory $root `
     -RedirectStandardOutput $stdoutLog `
     -RedirectStandardError  $stderrLog `
