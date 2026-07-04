@@ -331,6 +331,163 @@ def render(
             )
         console.print(board_table)
 
+    _render_legend(console)
+
+
+def _legend_table(title: str, rows: list[tuple[str, str]]) -> Table:
+    table = Table(title=title, title_justify="left", show_header=False, expand=False)
+    table.add_column("Term", style="bold", no_wrap=True)
+    table.add_column("Meaning")
+    for term, meaning in rows:
+        table.add_row(term, meaning)
+    return table
+
+
+def _render_legend(console: Console) -> None:
+    """Legend explaining every dashboard field and why the model bets what it bets."""
+    console.print(
+        _legend_table(
+            "LEGEND — HOW A BET HAPPENS",
+            [
+                (
+                    "Pipeline",
+                    "Dixon-Coles goals model -> confederation/squad/lineup tilts -> "
+                    f"blended {settings.model_blend_weight:.0%} model / "
+                    f"{1 - settings.model_blend_weight:.0%} market anchor -> edge vs "
+                    "the Kalshi ask. A leg is bet only if edge >= "
+                    f"{settings.min_edge_threshold:.0%} AND every guard passes; the "
+                    "stake is half-Kelly, capped at "
+                    f"{settings.max_bet_fraction:.0%} of bankroll, one bet per "
+                    f"fixture, total exposure <= {settings.max_portfolio_exposure:.0%}"
+                    ", all betting halts at a "
+                    f"{settings.stop_loss_threshold:.0%} drawdown from peak "
+                    "(stop-loss).",
+                ),
+                (
+                    "Why anchor?",
+                    "18 early bets showed the raw model losing to the market line "
+                    "(worse Brier). Anchoring means an edge must come from the books "
+                    "disagreeing with Kalshi, or survive the shrink toward the "
+                    "market — raw model opinion alone can no longer fire a bet.",
+                ),
+            ],
+        )
+    )
+    console.print(
+        _legend_table(
+            "LEGEND — FIXTURE BOARD COLUMNS",
+            [
+                ("Leg", "Outcome: H home win, D draw, A away win (YES contracts)."),
+                (
+                    "Model",
+                    "The model's own probability after tilts, BEFORE the market "
+                    "anchor — 'what our model thinks'.",
+                ),
+                (
+                    "Book",
+                    "Sportsbook no-vig consensus (median across bookmakers). '—' "
+                    "means no book line; the blend anchors to normalized Kalshi "
+                    "prices instead.",
+                ),
+                (
+                    "Blend",
+                    f"{settings.model_blend_weight:.0%} Model + "
+                    f"{1 - settings.model_blend_weight:.0%} anchor — the probability "
+                    "every bet decision actually runs on.",
+                ),
+                (
+                    "Kalshi",
+                    "YES ask price in cents = the market's implied probability.",
+                ),
+                (
+                    "Edge",
+                    "Blend minus Kalshi price. Positive = the blend thinks the "
+                    f"contract is underpriced; needs >= +{settings.min_edge_threshold:.0%} "
+                    "to bet.",
+                ),
+                ("Decision", "What happened to the leg — codes below."),
+                (
+                    "Sorting",
+                    "Fixtures with the largest absolute edge on any leg sort first — "
+                    "the discrepancies worth a human look are on top.",
+                ),
+            ],
+        )
+    )
+    console.print(
+        _legend_table(
+            "LEGEND — DECISION CODES",
+            [
+                ("signal", "Bet placed (or would be, when running dry)."),
+                (
+                    "below_threshold",
+                    f"Edge under the {settings.min_edge_threshold:.0%} minimum — "
+                    "no bet.",
+                ),
+                (
+                    "filtered:below_price_floor",
+                    "Market under 6c: longshot noise, not signal.",
+                ),
+                (
+                    "filtered:model_market_mismatch",
+                    "Blend prices the leg far above the line (>2.5x favorite, >1.6x "
+                    "draw/underdog) — likelier miscalibration than value; defer to "
+                    "the market.",
+                ),
+                (
+                    "filtered:powerhouse_favorite",
+                    "Draw/upset leg against a >=200 ELO favorite — the model's upset "
+                    "probabilities aren't trusted in mismatches.",
+                ),
+                (
+                    "filtered:powerhouse_favorite_squad",
+                    "Same guard at a >=150 ELO gap when squad ratings independently "
+                    "confirm the favorite.",
+                ),
+                ("held", "Already holding this market — never top up a position."),
+                (
+                    "one_per_fixture",
+                    "A higher-edge leg of the same match took the single slot (the "
+                    "H/D/A legs are mutually exclusive).",
+                ),
+                (
+                    "risk:*",
+                    "Portfolio guard: stop_loss "
+                    f"({settings.stop_loss_threshold:.0%} drawdown halt), "
+                    "max_positions (10 open), insufficient_liquidity (open interest "
+                    "floor), or exposure_cap "
+                    f"({settings.max_portfolio_exposure:.0%} of bankroll).",
+                ),
+                (
+                    "no_market",
+                    "No Kalshi market matched this fixture — a coverage gap worth "
+                    "checking, not a decision.",
+                ),
+            ],
+        )
+    )
+    console.print(
+        _legend_table(
+            "LEGEND — PORTFOLIO & THESES",
+            [
+                ("Bankroll / Peak", "Current Kalshi balance / its high-water mark."),
+                (
+                    "Exposure",
+                    "Cost of all open positions; new bets must keep it <= "
+                    f"{settings.max_portfolio_exposure:.0%} of bankroll.",
+                ),
+                ("Avg cents", "Average entry price per contract on the position."),
+                (
+                    "Why (thesis)",
+                    "'matchup: model X%, books Y%, Kalshi Zc -> +E% edge, half-Kelly "
+                    "$B' — the model view vs the books vs the market at bet time, "
+                    "and the stake that produced. '(Kalshi-anchored)' flags a bet "
+                    "made without a book line.",
+                ),
+            ],
+        )
+    )
+
 
 def main() -> None:
     import asyncio

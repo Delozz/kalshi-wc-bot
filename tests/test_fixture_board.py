@@ -246,3 +246,9 @@ def test_render_includes_fixture_board() -> None:
     assert "Brazil vs Serbia" in text
     assert "no Kalshi market" in text
     assert "signal" in text
+    # The legend always renders and covers all four sections.
+    assert "LEGEND — HOW A BET HAPPENS" in text
+    assert "LEGEND — FIXTURE BOARD COLUMNS" in text
+    assert "LEGEND — DECISION CODES" in text
+    assert "LEGEND — PORTFOLIO & THESES" in text
+    assert "below_threshold" in text
